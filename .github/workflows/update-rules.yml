@@ -1,0 +1,31 @@
+name: 更新Shadowrocket规则
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 每天UTC时间0点运行
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      
+      - name: 设置Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+          
+      - name: 安装依赖
+        run: pip install requests
+        
+      - name: 更新规则
+        run: python update_rules.py
+        
+      - name: 提交更改
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add custom_shadowrocket_rules.conf
+          git diff --quiet && git diff --staged --quiet || git commit -m "更新规则 $(date +'%Y-%m-%d')"
+          git push
