@@ -2,7 +2,7 @@ name: 更新Shadowrocket规则
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 每天UTC时间0点运行
+    - cron: '15 0 * * *'  # 每天UTC时间0:15 (北京时间8:15)
   workflow_dispatch:  # 允许手动触发
 
 jobs:
