@@ -1,5 +1,26 @@
 import requests
 import datetime
+import sys
+
+try:
+    # 原有代码...
+    
+    # 下载Johnshall规则
+    johnshall_url = "https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf"
+    johnshall_content = requests.get(johnshall_url).text
+
+    # 下载OpenAI规则
+    openai_url = "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/OpenAI/OpenAI.list"
+    openai_content = requests.get(openai_url).text
+
+    # 其余保持不变...
+    
+except Exception as e:
+    print(f"错误: {e}", file=sys.stderr)
+    sys.exit(1)
+
+import requests
+import datetime
 
 # 下载Johnshall规则
 johnshall_url = "https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf"
