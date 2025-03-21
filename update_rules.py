@@ -31,8 +31,8 @@ openai_url = "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/mas
 openai_content = requests.get(openai_url).text
 
 # 定义节点名称
-default_node = "V2(vless+vision+reality)"
-openai_node = "V3家宽住宅"
+default_node = "V3(vless+vision+reality)"
+openai_node = "V3 Static Residential"
 
 # 处理规则内容
 rule_section_start = johnshall_content.find('[Rule]')
