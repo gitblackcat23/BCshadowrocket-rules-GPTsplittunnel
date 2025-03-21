@@ -4,6 +4,7 @@ on:
   schedule:
     - cron: '15 0 * * *'  # 每天UTC时间0:15 (北京时间8:15)
   workflow_dispatch:  # 允许手动触发
+  push:  # 添加这一行，使代码推送时自动触发
 
 jobs:
   update:
