@@ -1,0 +1,64 @@
+name: 规则源监控
+
+on:
+  schedule:
+    - cron: '0 12 * * *'  # 每天北京时间20:00运行(UTC+8)
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检查外部规则可用性
+        id: check_rules
+        run: |
+          JOHNSHALL_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf)
+          OPENAI_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/OpenAI/OpenAI.list)
+          
+          echo "Johnshall规则状态: $JOHNSHALL_CODE"
+          echo "OpenAI规则状态: $OPENAI_CODE"
+          
+          if [ "$JOHNSHALL_CODE" != "200" ] || [ "$OPENAI_CODE" != "200" ]; then
+            echo "::set-output name=status::failure"
+            echo "::set-output name=message::外部规则源访问失败！Johnshall: $JOHNSHALL_CODE, OpenAI: $OPENAI_CODE"
+            exit 1
+          else
+            echo "::set-output name=status::success"
+            echo "::set-output name=message::所有规则源正常"
+          fi
+          
+      - name: 创建GitHub Issues通知
+        if: failure()
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '⚠️ 规则源访问警报',
+              body: `## 监控检测到外部规则源异常\n\n${process.env.ERROR_MESSAGE}\n\n时间: ${new Date().toISOString()}\n\n请检查并解决此问题！`
+            })
+        env:
+          ERROR_MESSAGE: ${{ steps.check_rules.outputs.message }}
+      
+      # 如果需要邮件通知，添加以下步骤
+      - name: 发送邮件通知
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.MAIL_SERVER }}
+          server_port: ${{ secrets.MAIL_PORT }}
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "⚠️ [Shadowrocket规则] 外部规则源异常"
+          body: |
+            监控检测到外部规则源异常
+            
+            ${{ steps.check_rules.outputs.message }}
+            
+            时间: ${{ github.event.repository.updated_at }}
+            
+            请检查并解决此问题！
+          to: your-email@example.com  # 替换为您的邮箱
+          from: GitHub Actions
