@@ -8,33 +8,54 @@ if not os.path.exists('backups'):
     os.makedirs('backups')
 
 # Apple 和 iCloud 服务的域名列表，确保它们走直连
+# (这是一个合并优化后的版本，确保苹果核心服务、iCloud、App Store 和推送服务稳定快速)
 apple_domains = [
+    # Apple Core & iCloud - 核心服务、认证与同步
     'apple.com',
-    'icloud.com',
-    'icloud.com.cn',
-    'itunes.com',
+    'apple.cn',                          # 新增: 苹果中国区服务
     'apple-cloudkit.com',
     'apple-livephotoskit.com',
-    'cdn-apple.com',
-    'gc.apple.com',
-    'gs.apple.com',
-    'humb.apple.com',
-    'iprofiles.apple.com',
-    'push.apple.com',
+    'icloud.com',
+    'icloud.com.cn',
+    'icloud-content.com',                # 新增: iCloud 内容服务
+    'me.com',                            # 新增: MobileMe/iCloud 邮箱等
+    'identity.apple.com',                # 账户认证
+    'gs.apple.com',                      # 设备激活与验证
+    'albert.apple.com',                  # iTunes 认证
+    'gdmf.apple.com',                    # 设备管理
+
+    # Content, App Store & Updates - 内容、应用商店和软件更新
+    'itunes.com',
+    'mzstatic.com',                      # 新增: App Store 和 iTunes 内容资源
+    'cdn-apple.com',                     # Apple 的主要内容分发网络(CDN)
+    'aaplimg.com',                       # 新增: 苹果图片/资源 CDN
     'static.ips.apple.com',
-    'albert.apple.com',
-    'captive.apple.com',
-    'deviceenrollment.apple.com',
+    'apps.apple.com',                    # 显式添加，确保优先级
+
+    # Push Notification - APNs 推送服务
+    'push.apple.com',
+    '1-courier.push.apple.com',          # 新增: 推送服务器
+    '2-courier.push.apple.com',          # 新增
+    '3-courier.push.apple.com',          # 新增
+    '4-courier.push.apple.com',          # 新增
+    '5-courier.push.apple.com',          # 新增
+
+    # System & Device Services - 系统网络与设备服务
+    'captive.apple.com',                 # 用于检测Wi-Fi登录页
+    'deviceenrollment.apple.com',        # 设备注册管理
     'deviceservices-external.apple.com',
-    'gdmf.apple.com',
-    'identity.apple.com',
+    'iprofiles.apple.com',
     'sq-device.apple.com',
     'tbsc.apple.com',
-    'time.apple.com',
+    'time.apple.com',                    # 时间同步服务
     'time-ios.apple.com',
     'time-macos.apple.com',
+
+    # iCloud Private Relay & Mask - 隐私中继相关
     'mask.icloud.com',
-    'mask-h2.icloud.com'
+    'mask-h2.icloud.com',
+    'gateway.icloud.com',                # 新增: iCloud 网关
+    'setup.icloud.com',                  # 新增: iCloud 设置
 ]
 
 try:
