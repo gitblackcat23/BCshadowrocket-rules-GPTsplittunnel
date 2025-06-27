@@ -16,7 +16,8 @@ DIRECT_LISTS=(
 PROXY_LISTS=(
     "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/OpenAI/OpenAI.list"
 )
-REJECT_LIST_URL="https://raw.githubusercontent.com/Johnshall/Shadowrocket-ADBlock-Rules-Forever/master/Johnshall_ADBlock_File_For_Shadowrocket.conf"
+# --- 这里是关键修改：使用了Johnshall仓库的一个可用Fork ---
+REJECT_LIST_URL="https://raw.githubusercontent.com/flycatdev/Johnshall-Shadowrocket-ADBlock-Rules-Forever/master/Johnshall_ADBlock_File_For_Shadowrocket.conf"
 
 SOURCE_DIR="./source"
 DIRECT_DIR="$SOURCE_DIR/direct"
@@ -81,10 +82,25 @@ for file in $PROXY_DIR/*.list; do
 done
 
 # 处理广告/拒绝规则 (更稳健的提取方式)
-echo -e "\n# REJECT Rules (from Johnshall)" >> $TEMP_RULES
+echo -e "\n# REJECT Rules (from Johnshall's Fork)" >> $TEMP_RULES
 # 从[Rule]行开始，到下一个[Section]行为止，只提取非注释和非空行
 awk '/^\[Rule\]/{f=1;next} /^\[/{f=0} f && !/^\s*($|#)/{print}' "$REJECT_DIR/ADBlock.conf" | sed 's/\r$//' >> $TEMP_RULES
 
 echo "✅ 规则合并完成。"
 
-#
+# -----------------
+# 4. 生成最终的配置文件
+# -----------------
+echo "📝 正在生成最终配置文件: $FINAL_RULES_FILE"
+
+BUILD_TIME=$(date -u +"%Y-%m-%d %H:%M:%S")
+
+# 使用 sed 将处理好的规则内容插入到模板的占位符位置
+sed -e "/# {{RULES_CONTENT}}/r $TEMP_RULES" -e "/# {{RULES_CONTENT}}/d" "template.conf" > temp_conf
+# 替换构建时间占位符
+sed "s/{{BUILD_TIME}}/$BUILD_TIME UTC/g" temp_conf > $FINAL_RULES_FILE
+
+# 清理临时文件
+rm $TEMP_RULES temp_conf
+
+echo "🎉 构建成功！"
