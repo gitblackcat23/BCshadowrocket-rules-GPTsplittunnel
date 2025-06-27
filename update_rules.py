@@ -7,6 +7,36 @@ import os
 if not os.path.exists('backups'):
     os.makedirs('backups')
 
+# Apple 和 iCloud 服务的域名列表，确保它们走直连
+apple_domains = [
+    'apple.com',
+    'icloud.com',
+    'icloud.com.cn',
+    'itunes.com',
+    'apple-cloudkit.com',
+    'apple-livephotoskit.com',
+    'cdn-apple.com',
+    'gc.apple.com',
+    'gs.apple.com',
+    'humb.apple.com',
+    'iprofiles.apple.com',
+    'push.apple.com',
+    'static.ips.apple.com',
+    'albert.apple.com',
+    'captive.apple.com',
+    'deviceenrollment.apple.com',
+    'deviceservices-external.apple.com',
+    'gdmf.apple.com',
+    'identity.apple.com',
+    'sq-device.apple.com',
+    'tbsc.apple.com',
+    'time.apple.com',
+    'time-ios.apple.com',
+    'time-macos.apple.com',
+    'mask.icloud.com',
+    'mask-h2.icloud.com'
+]
+
 try:
     # 下载Johnshall规则
     johnshall_url = "https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf"
@@ -83,8 +113,14 @@ IP-CIDR,24.199.123.28/32,no-resolve"""
         rules = johnshall_content[rule_section_start + 7:rule_section_end]
         after_rules = johnshall_content[rule_section_end:]
 
+        # --- 新增Apple & iCloud 直连规则 ---
+        apple_rules_str = "# Apple & iCloud Services (DIRECT to fix sync issues) - " + datetime.datetime.now().strftime("%Y-%m-%d") + "\n"
+        for domain in apple_domains:
+            apple_rules_str += f"DOMAIN-SUFFIX,{domain},DIRECT\n"
+        apple_rules_str += "\n"
+
         # 插入OpenAI规则和设置默认节点
-        new_rules = "# OpenAI Rules (使用节点: " + openai_node + ") - 更新于" + datetime.datetime.now().strftime("%Y-%m-%d") + "\n"
+        openai_rules_str = "# OpenAI Rules (使用节点: " + openai_node + ") - 更新于" + datetime.datetime.now().strftime("%Y-%m-%d") + "\n"
         
         # 使用RULE-SET方式或直接嵌入规则
         if openai_content.startswith("DOMAIN") or openai_content.startswith("# OpenAI"):
@@ -92,12 +128,13 @@ IP-CIDR,24.199.123.28/32,no-resolve"""
             lines = openai_content.strip().split('\n')
             for line in lines:
                 if line and not line.startswith('#'):
-                    new_rules += line + "," + openai_node + "\n"
+                    openai_rules_str += line + "," + openai_node + "\n"
         else:
             # 使用RULE-SET方式
-            new_rules += "RULE-SET," + openai_url + "," + openai_node + "\n\n"
+            openai_rules_str += "RULE-SET," + openai_url + "," + openai_node + "\n"
         
-        new_rules += "# 原始规则\n" + rules
+        # 组合所有规则：Apple直连 -> OpenAI -> 原始规则
+        new_rules = apple_rules_str + openai_rules_str + "\n# 原始规则\n" + rules
 
         # 替换FINAL规则
         if "FINAL," in new_rules:
@@ -110,8 +147,12 @@ IP-CIDR,24.199.123.28/32,no-resolve"""
         new_content = before_rules + new_rules + after_rules
     except Exception as e:
         print(f"处理规则内容时出错: {e}")
-        # 使用基本模板创建一个最小化但有效的配置
-        new_content = """[General]
+        # --- 创建包含Apple直连规则的最小化备用配置 ---
+        apple_fallback_rules = ""
+        for domain in apple_domains:
+            apple_fallback_rules += f"DOMAIN-SUFFIX,{domain},DIRECT\n"
+
+        new_content = f"""[General]
 bypass-system = true
 skip-proxy = 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, localhost, *.local, captive.apple.com
 tun-excluded-routes = 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.88.99.0/24, 192.168.0.0/16, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 255.255.255.255/32, 239.255.255.250/32
@@ -120,23 +161,25 @@ ipv6 = false
 update-url = https://raw.githubusercontent.com/gitblackcat23/BCshadowrocket-rules-GPTsplittunnel/main/custom_shadowrocket_rules.conf
 
 [Rule]
-# OpenAI Rules (使用节点: """ + openai_node + """) - 更新于""" + datetime.datetime.now().strftime("%Y-%m-%d") + """
-DOMAIN-SUFFIX,openai.com,""" + openai_node + """
-DOMAIN-SUFFIX,ai.com,""" + openai_node + """
-DOMAIN-SUFFIX,auth0.com,""" + openai_node + """
-DOMAIN-KEYWORD,openai,""" + openai_node + """
-DOMAIN,chat.openai.com,""" + openai_node + """
-DOMAIN,platform.openai.com,""" + openai_node + """
-DOMAIN,openaiapi-site.azureedge.net,""" + openai_node + """
-IP-CIDR,24.199.123.28/32,""" + openai_node + """,no-resolve
+# Apple & iCloud Services (DIRECT to fix sync issues)
+{apple_fallback_rules}
+# OpenAI Rules (使用节点: {openai_node}) - 更新于{datetime.datetime.now().strftime("%Y-%m-%d")}
+DOMAIN-SUFFIX,openai.com,{openai_node}
+DOMAIN-SUFFIX,ai.com,{openai_node}
+DOMAIN-SUFFIX,auth0.com,{openai_node}
+DOMAIN-KEYWORD,openai,{openai_node}
+DOMAIN,chat.openai.com,{openai_node}
+DOMAIN,platform.openai.com,{openai_node}
+DOMAIN,openaiapi-site.azureedge.net,{openai_node}
+IP-CIDR,24.199.123.28/32,{openai_node},no-resolve
 
 # 其他所有流量
-FINAL,""" + default_node + """
+FINAL,{default_node}
 
 [Host]
 localhost = 127.0.0.1
 """
-        print("创建了最小化但有效的配置")
+        print("创建了包含Apple直连规则的最小化备用配置")
 
     # 写入文件
     with open('custom_shadowrocket_rules.conf', 'w', encoding='utf-8') as f:
