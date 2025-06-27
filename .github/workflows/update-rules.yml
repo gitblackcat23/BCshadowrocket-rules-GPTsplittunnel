@@ -3,39 +3,32 @@ name: 更新Shadowrocket规则
 on:
   schedule:
     - cron: '15 0 * * *'  # 每天UTC时间0:15 (北京时间8:15)
-  workflow_dispatch:      # 允许手动触发
-  push:                   # 代码推送时自动触发
+  workflow_dispatch:  # 允许手动触发
+  push:  # 添加这一行，使代码推送时自动触发
 
 jobs:
-  build:
+  update:
     runs-on: ubuntu-latest
     permissions:
-      contents: write      # 授予工作流写入仓库内容的权限
-
+      contents: write  # 明确授予写入权限
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4 # 步骤1: 检出你的仓库代码
-
-      - name: Set up Git User
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-
-      - name: Grant execute permission for build script
-        run: chmod +x build.sh # 步骤2: 赋予我们创建的构建脚本执行权限
-
-      - name: Build the rule file using the script
-        run: ./build.sh # 步骤3: 运行构建脚本，它会下载并合并所有规则
-
-      - name: Commit and Push changes
-        run: |
-          # 步骤4: 将新生成的规则文件添加到暂存区
-          git add BCshadowrocket.conf
+      - uses: actions/checkout@v2
+      
+      - name: 设置Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
           
-          # 检查是否有文件变动，只有在有变动时才执行提交，避免产生空的commit
-          if ! git diff --staged --quiet; then
-            git commit -m "chore(rules): 更新规则 $(date +'%Y-%m-%d')"
-            git push
-          else
-            echo "No changes to commit. Workflow finished."
-          fi
+      - name: 安装依赖
+        run: pip install requests
+        
+      - name: 更新规则
+        run: python update_rules.py
+        
+      - name: 提交更改
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add custom_shadowrocket_rules.conf
+          git diff --quiet && git diff --staged --quiet || git commit -m "更新规则 $(date +'%Y-%m-%d')"
+          git push
