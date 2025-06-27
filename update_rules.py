@@ -58,6 +58,22 @@ apple_domains = [
     'setup.icloud.com',                  # 新增: iCloud 设置
 ]
 
+# --- 新增: 同花顺相关域名，确保它们走直连 ---
+tonghuashun_domains = [
+    '10jqka.com.cn',
+    'hexin.cn',
+    'data.10jqka.com.cn',
+    't.10jqka.com.cn',
+    'news.10jqka.com.cn',
+    'q.10jqka.com.cn',
+    'basic.10jqka.com.cn',
+    'moni.10jqka.com.cn',
+    'upass.10jqka.com.cn',
+    'user.10jqka.com.cn',
+    'search.10jqka.com.cn',
+    '5188.money.10jqka.com.cn',
+]
+
 try:
     # 下载Johnshall规则
     johnshall_url = "https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf"
@@ -139,6 +155,12 @@ IP-CIDR,24.199.123.28/32,no-resolve"""
         for domain in apple_domains:
             apple_rules_str += f"DOMAIN-SUFFIX,{domain},DIRECT\n"
         apple_rules_str += "\n"
+        
+        # --- 新增同花顺直连规则 ---
+        tonghuashun_rules_str = "# Tonghuashun (DIRECT) - " + datetime.datetime.now().strftime("%Y-%m-%d") + "\n"
+        for domain in tonghuashun_domains:
+            tonghuashun_rules_str += f"DOMAIN-SUFFIX,{domain},DIRECT\n"
+        tonghuashun_rules_str += "\n"
 
         # 插入OpenAI规则和设置默认节点
         openai_rules_str = "# OpenAI Rules (使用节点: " + openai_node + ") - 更新于" + datetime.datetime.now().strftime("%Y-%m-%d") + "\n"
@@ -154,8 +176,8 @@ IP-CIDR,24.199.123.28/32,no-resolve"""
             # 使用RULE-SET方式
             openai_rules_str += "RULE-SET," + openai_url + "," + openai_node + "\n"
         
-        # 组合所有规则：Apple直连 -> OpenAI -> 原始规则
-        new_rules = apple_rules_str + openai_rules_str + "\n# 原始规则\n" + rules
+        # 组合所有规则：Apple直连 -> 同花顺直连 -> OpenAI -> 原始规则
+        new_rules = apple_rules_str + tonghuashun_rules_str + openai_rules_str + "\n# 原始规则\n" + rules
 
         # 替换FINAL规则
         if "FINAL," in new_rules:
@@ -168,10 +190,14 @@ IP-CIDR,24.199.123.28/32,no-resolve"""
         new_content = before_rules + new_rules + after_rules
     except Exception as e:
         print(f"处理规则内容时出错: {e}")
-        # --- 创建包含Apple直连规则的最小化备用配置 ---
+        # --- 创建包含Apple和同花顺直连规则的最小化备用配置 ---
         apple_fallback_rules = ""
         for domain in apple_domains:
             apple_fallback_rules += f"DOMAIN-SUFFIX,{domain},DIRECT\n"
+        
+        tonghuashun_fallback_rules = ""
+        for domain in tonghuashun_domains:
+            tonghuashun_fallback_rules += f"DOMAIN-SUFFIX,{domain},DIRECT\n"
 
         new_content = f"""[General]
 bypass-system = true
@@ -184,6 +210,8 @@ update-url = https://raw.githubusercontent.com/gitblackcat23/BCshadowrocket-rule
 [Rule]
 # Apple & iCloud Services (DIRECT to fix sync issues)
 {apple_fallback_rules}
+# Tonghuashun (DIRECT)
+{tonghuashun_fallback_rules}
 # OpenAI Rules (使用节点: {openai_node}) - 更新于{datetime.datetime.now().strftime("%Y-%m-%d")}
 DOMAIN-SUFFIX,openai.com,{openai_node}
 DOMAIN-SUFFIX,ai.com,{openai_node}
@@ -200,7 +228,7 @@ FINAL,{default_node}
 [Host]
 localhost = 127.0.0.1
 """
-        print("创建了包含Apple直连规则的最小化备用配置")
+        print("创建了包含Apple和同花顺直连规则的最小化备用配置")
 
     # 写入文件
     with open('custom_shadowrocket_rules.conf', 'w', encoding='utf-8') as f:
@@ -230,4 +258,3 @@ except Exception as e:
             print("没有找到可用的备份文件")
     except Exception as recovery_error:
         print(f"尝试恢复配置时出错: {recovery_error}")
-
