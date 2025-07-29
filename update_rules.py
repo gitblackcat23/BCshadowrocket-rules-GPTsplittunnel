@@ -10,52 +10,76 @@ if not os.path.exists('backups'):
 # Apple 和 iCloud 服务的域名列表，确保它们走直连
 # (这是一个合并优化后的版本，确保苹果核心服务、iCloud、App Store 和推送服务稳定快速)
 apple_domains = [
-    # Apple Core & iCloud - 核心服务、认证与同步
+    # --- Apple Core, Account & iCloud Sync ---
     'apple.com',
-    'apple.cn',                          # 新增: 苹果中国区服务
+    'apple.cn',
     'apple-cloudkit.com',
     'apple-livephotoskit.com',
     'icloud.com',
     'icloud.com.cn',
-    'icloud-content.com',                # 新增: iCloud 内容服务
-    'me.com',                            # 新增: MobileMe/iCloud 邮箱等
-    'identity.apple.com',                # 账户认证
-    'gs.apple.com',                      # 设备激活与验证
-    'albert.apple.com',                  # iTunes 认证
-    'gdmf.apple.com',                    # 设备管理
+    'icloud-content.com',
+    'me.com',
+    'files.apple.com',                      # [新增] iCloud Drive 文件访问，对备忘录、文件同步至关重要
+    'ws.icloud.com',                        # [新增] iCloud Web Services，同步逻辑依赖
+    'com.apple.ubiquity.bulletin',          # [新增] iCloud "back to my mac"
+    'com.apple.photos',                     # [新增]
 
-    # Content, App Store & Updates - 内容、应用商店和软件更新
+    # --- Authentication & Setup ---
+    'identity.apple.com',
+    'gs.apple.com',
+    'albert.apple.com',
+    'gdmf.apple.com',
+    'setup.icloud.com',
+    'configuration.apple.com',              # [新增] Apple 设备配置服务
+
+    # --- Content, App Store & Updates ---
     'itunes.com',
-    'mzstatic.com',                      # 新增: App Store 和 iTunes 内容资源
-    'cdn-apple.com',                     # Apple 的主要内容分发网络(CDN)
-    'aaplimg.com',                       # 新增: 苹果图片/资源 CDN
+    'mzstatic.com',
+    'cdn-apple.com',
+    'aaplimg.com',
     'static.ips.apple.com',
-    'apps.apple.com',                    # 显式添加，确保优先级
+    'apps.apple.com',
+    'p30-buy.itunes.apple.com',             # [新增] iCloud 存储购买与管理
+    'books.itunes.apple.com',               # [新增]
+    'secure.store.apple.com',               # [新增]
+    'news-assets.apple.com',                # [新增] Apple News 资源
+    'streaming.apple.com',                  # [新增] Apple Music & TV+ 流媒体
+    'music.apple.com',                      # [新增]
+    'tv.apple.com',                         # [新增]
+    'search.itunes.apple.com',              # [新增]
 
-    # Push Notification - APNs 推送服务
+    # --- Push Notification (APNs) ---
     'push.apple.com',
-    '1-courier.push.apple.com',          # 新增: 推送服务器
-    '2-courier.push.apple.com',          # 新增
-    '3-courier.push.apple.com',          # 新增
-    '4-courier.push.apple.com',          # 新增
-    '5-courier.push.apple.com',          # 新增
+    '1-courier.push.apple.com',
+    '2-courier.push.apple.com',
+    '3-courier.push.apple.com',
+    '4-courier.push.apple.com',
+    '5-courier.push.apple.com',
 
-    # System & Device Services - 系统网络与设备服务
-    'captive.apple.com',                 # 用于检测Wi-Fi登录页
-    'deviceenrollment.apple.com',        # 设备注册管理
+    # --- System, Device & Other Services ---
+    'captive.apple.com',
+    'deviceenrollment.apple.com',
     'deviceservices-external.apple.com',
     'iprofiles.apple.com',
     'sq-device.apple.com',
     'tbsc.apple.com',
-    'time.apple.com',                    # 时间同步服务
+    'time.apple.com',
     'time-ios.apple.com',
     'time-macos.apple.com',
-
-    # iCloud Private Relay & Mask - 隐私中继相关
+    'gsa.apple.com',                        # [新增] Apple 服务访问
+    'iadsdk.apple.com',                     # [新增] Apple 广告服务框架
+    'metrics.apple.com',                    # [新增] 诊断与用量数据
+    'wallet.apple.com',                     # [新增] Apple Wallet
+    'weather-data.apple.com',               # [新增] 天气服务数据
+    'api.weather.com',                      # [新增]
+    'siri.apple.com',                       # [新增]
+    'locationd.apple.com',                  # [新增] 定位服务
+    'icloud-api.apple.com',                 # [新增]
+    
+    # --- iCloud Private Relay & Mask ---
     'mask.icloud.com',
     'mask-h2.icloud.com',
-    'gateway.icloud.com',                # 新增: iCloud 网关
-    'setup.icloud.com',                  # 新增: iCloud 设置
+    'gateway.icloud.com',
 ]
 
 # --- 新增: 同花顺相关域名，确保它们走直连 ---
