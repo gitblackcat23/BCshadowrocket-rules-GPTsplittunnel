@@ -98,52 +98,6 @@ try:
             print("使用Johnshall规则备份")
         else:
             raise Exception("没有Johnshall规则备份可用")
-    # --- 修正规则：强制将冲突的Apple CDN规则从Proxy改为DIRECT ---
-print("正在修正原始规则中的Apple CDN代理冲突...")
-apple_cdn_proxy_rules_to_fix = [
-    'adcdownload.apple.com.akadns.net',
-    'appldnld.g.aaplimg.com',
-    'cds-cdn.v.aaplimg.com',
-    'cds.apple.com.akadns.net',
-    'cl1-cdn.origin-apple.com.akadns.net',
-    'cl3-cdn.origin-apple.com.akadns.net',
-    'cl4-cdn.origin-apple.com.akadns.net',
-    'cl5-cdn.origin-apple.com.akadns.net',
-    'clientflow.apple.com.akadns.net',
-    'configuration.apple.com.akadns.net',
-    'dd-cdn.origin-apple.com.akadns.net',
-    'cdn.apple-mapkit.com',
-    'gspe19-cn.ls-apple.com.akadns.net',
-    'gs-loc-cn.apple.com',
-    'icloud-cdn.icloud.com.akadns.net',
-    'init-p01md-lb.push-apple.com.akadns.net',
-    'init-p01st-lb.push-apple.com.akadns.net',
-    'init-s01st-lb.push-apple.com.akadns.net',
-    'itunes-apple.com.akadns.net',
-    'mesu-china.apple.com.akadns.net',
-    'mesu-cdn.apple.com.akadns.net',
-    'ocsp-lb.apple.com.akadns.net',
-    'oscdn.origin-apple.com.akadns.net',
-    'pancake.cdn-apple.com.akadns.net',
-    'prod-support.apple-support.akadns.net',
-    'stocks-sparkline-lb.apple.com.akadns.net',
-    'store.storeimages.apple.com.akadns.net',
-    'support-china.apple-support.akadns.net',
-    'swcatalog-cdn.apple.com.akadns.net',
-    'swdist.apple.com.akadns.net',
-    'swscan-cdn.apple.com.akadns.net',
-    'valid.origin-apple.com.akadns.net',
-    'phobos.apple.com'
-]
-
-for domain in apple_cdn_proxy_rules_to_fix:
-    rule_to_find = f"DOMAIN-SUFFIX,{domain},Proxy"
-    rule_to_replace = f"DOMAIN-SUFFIX,{domain},DIRECT"
-    if rule_to_find in johnshall_content:
-        johnshall_content = johnshall_content.replace(rule_to_find, rule_to_replace)
-        print(f"  - 已修正: {domain} -> DIRECT")
-print("Apple CDN代理冲突修正完成。")
-# --- 修正结束 ---
 
     # 下载OpenAI规则
     openai_url = "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/OpenAI/OpenAI.list"
