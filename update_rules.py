@@ -8,7 +8,6 @@ if not os.path.exists('backups'):
     os.makedirs('backups')
 
 # Apple 和 iCloud 服务的域名列表，确保它们走直连
-# (这是一个合并优化后的版本，确保苹果核心服务、iCloud、App Store 和推送服务稳定快速)
 apple_domains = [
     # --- Apple Core, Account & iCloud Sync ---
     'apple.com',
@@ -19,10 +18,10 @@ apple_domains = [
     'icloud.com.cn',
     'icloud-content.com',
     'me.com',
-    'files.apple.com',                      # [新增] iCloud Drive 文件访问，对备忘录、文件同步至关重要
-    'ws.icloud.com',                        # [新增] iCloud Web Services，同步逻辑依赖
-    'com.apple.ubiquity.bulletin',          # [新增] iCloud "back to my mac"
-    'com.apple.photos',                     # [新增]
+    'files.apple.com',
+    'ws.icloud.com',
+    'com.apple.ubiquity.bulletin',
+    'com.apple.photos',
 
     # --- Authentication & Setup ---
     'identity.apple.com',
@@ -30,7 +29,7 @@ apple_domains = [
     'albert.apple.com',
     'gdmf.apple.com',
     'setup.icloud.com',
-    'configuration.apple.com',              # [新增] Apple 设备配置服务
+    'configuration.apple.com',
 
     # --- Content, App Store & Updates ---
     'itunes.com',
@@ -39,14 +38,14 @@ apple_domains = [
     'aaplimg.com',
     'static.ips.apple.com',
     'apps.apple.com',
-    'p30-buy.itunes.apple.com',             # [新增] iCloud 存储购买与管理
-    'books.itunes.apple.com',               # [新增]
-    'secure.store.apple.com',               # [新增]
-    'news-assets.apple.com',                # [新增] Apple News 资源
-    'streaming.apple.com',                  # [新增] Apple Music & TV+ 流媒体
-    'music.apple.com',                      # [新增]
-    'tv.apple.com',                         # [新增]
-    'search.itunes.apple.com',              # [新增]
+    'p30-buy.itunes.apple.com',
+    'books.itunes.apple.com',
+    'secure.store.apple.com',
+    'news-assets.apple.com',
+    'streaming.apple.com',
+    'music.apple.com',
+    'tv.apple.com',
+    'search.itunes.apple.com',
 
     # --- Push Notification (APNs) ---
     'push.apple.com',
@@ -66,15 +65,15 @@ apple_domains = [
     'time.apple.com',
     'time-ios.apple.com',
     'time-macos.apple.com',
-    'gsa.apple.com',                        # [新增] Apple 服务访问
-    'iadsdk.apple.com',                     # [新增] Apple 广告服务框架
-    'metrics.apple.com',                    # [新增] 诊断与用量数据
-    'wallet.apple.com',                     # [新增] Apple Wallet
-    'weather-data.apple.com',               # [新增] 天气服务数据
-    'api.weather.com',                      # [新增]
-    'siri.apple.com',                       # [新增]
-    'locationd.apple.com',                  # [新增] 定位服务
-    'icloud-api.apple.com',                 # [新增]
+    'gsa.apple.com',
+    'iadsdk.apple.com',
+    'metrics.apple.com',
+    'wallet.apple.com',
+    'weather-data.apple.com',
+    'api.weather.com',
+    'siri.apple.com',
+    'locationd.apple.com',
+    'icloud-api.apple.com',
     
     # --- iCloud Private Relay & Mask ---
     'mask.icloud.com',
@@ -82,7 +81,7 @@ apple_domains = [
     'gateway.icloud.com',
 ]
 
-# --- 新增: 同花顺相关域名，确保它们走直连 ---
+# --- 同花顺相关域名，确保它们走直连 ---
 tonghuashun_domains = [
     '10jqka.com.cn',
     'hexin.cn',
@@ -98,6 +97,13 @@ tonghuashun_domains = [
     '5188.money.10jqka.com.cn',
 ]
 
+# --- 新增: GitHub Copilot / OpenAI Codex 相关域名，强制走 OpenAI 节点 ---
+copilot_domains = [
+    'api.githubcopilot.com',
+    'copilot-proxy.githubusercontent.com',
+    'copilot-telemetry.githubusercontent.com',
+    'origin-tracker.githubusercontent.com',
+]
 
 try:
     # 下载Johnshall规则
@@ -175,17 +181,24 @@ IP-CIDR,24.199.123.28/32,no-resolve"""
         rules = johnshall_content[rule_section_start + 7:rule_section_end]
         after_rules = johnshall_content[rule_section_end:]
 
-        # --- 新增Apple & iCloud 直连规则 ---
-        apple_rules_str = "# Apple & iCloud Services (DIRECT to fix sync issues) - " + datetime.datetime.now().strftime("%Y-%m-%d") + "\n"
+        # --- 生成Apple & iCloud 直连规则 ---
+        apple_rules_str = "# Apple & iCloud Services (DIRECT) - " + datetime.datetime.now().strftime("%Y-%m-%d") + "\n"
         for domain in apple_domains:
             apple_rules_str += f"DOMAIN-SUFFIX,{domain},DIRECT\n"
         apple_rules_str += "\n"
         
-        # --- 新增同花顺直连规则 ---
+        # --- 生成同花顺直连规则 ---
         tonghuashun_rules_str = "# Tonghuashun (DIRECT) - " + datetime.datetime.now().strftime("%Y-%m-%d") + "\n"
         for domain in tonghuashun_domains:
             tonghuashun_rules_str += f"DOMAIN-SUFFIX,{domain},DIRECT\n"
         tonghuashun_rules_str += "\n"
+
+        # --- 新增：生成 GitHub Copilot 分流规则 ---
+        copilot_rules_str = "# GitHub Copilot & Codex (使用节点: " + openai_node + ") - " + datetime.datetime.now().strftime("%Y-%m-%d") + "\n"
+        for domain in copilot_domains:
+            # 注意：这里使用 DOMAIN 精确匹配，防止误杀其他无关的 github 流量
+            copilot_rules_str += f"DOMAIN,{domain},{openai_node}\n"
+        copilot_rules_str += "\n"
 
         # 插入OpenAI规则和设置默认节点
         openai_rules_str = "# OpenAI Rules (使用节点: " + openai_node + ") - 更新于" + datetime.datetime.now().strftime("%Y-%m-%d") + "\n"
@@ -201,8 +214,8 @@ IP-CIDR,24.199.123.28/32,no-resolve"""
             # 使用RULE-SET方式
             openai_rules_str += "RULE-SET," + openai_url + "," + openai_node + "\n"
         
-        # 组合所有规则：Apple直连 -> 同花顺直连 -> OpenAI -> 原始规则
-        new_rules = apple_rules_str + tonghuashun_rules_str + openai_rules_str + "\n# 原始规则\n" + rules
+        # 组合所有规则：Apple直连 -> 同花顺直连 -> Copilot分流 -> OpenAI分流 -> 原始规则
+        new_rules = apple_rules_str + tonghuashun_rules_str + copilot_rules_str + openai_rules_str + "\n# 原始规则\n" + rules
 
         # 替换FINAL规则
         if "FINAL," in new_rules:
@@ -215,7 +228,7 @@ IP-CIDR,24.199.123.28/32,no-resolve"""
         new_content = before_rules + new_rules + after_rules
     except Exception as e:
         print(f"处理规则内容时出错: {e}")
-        # --- 创建包含Apple和同花顺直连规则的最小化备用配置 ---
+        # --- 创建包含Apple、同花顺和Copilot的最小化备用配置 ---
         apple_fallback_rules = ""
         for domain in apple_domains:
             apple_fallback_rules += f"DOMAIN-SUFFIX,{domain},DIRECT\n"
@@ -223,6 +236,10 @@ IP-CIDR,24.199.123.28/32,no-resolve"""
         tonghuashun_fallback_rules = ""
         for domain in tonghuashun_domains:
             tonghuashun_fallback_rules += f"DOMAIN-SUFFIX,{domain},DIRECT\n"
+
+        copilot_fallback_rules = ""
+        for domain in copilot_domains:
+            copilot_fallback_rules += f"DOMAIN,{domain},{openai_node}\n"
 
         new_content = f"""[General]
 bypass-system = true
@@ -237,6 +254,8 @@ update-url = https://raw.githubusercontent.com/gitblackcat23/BCshadowrocket-rule
 {apple_fallback_rules}
 # Tonghuashun (DIRECT)
 {tonghuashun_fallback_rules}
+# GitHub Copilot & Codex (Proxy)
+{copilot_fallback_rules}
 # OpenAI Rules (使用节点: {openai_node}) - 更新于{datetime.datetime.now().strftime("%Y-%m-%d")}
 DOMAIN-SUFFIX,openai.com,{openai_node}
 DOMAIN-SUFFIX,ai.com,{openai_node}
@@ -253,7 +272,7 @@ FINAL,{default_node}
 [Host]
 localhost = 127.0.0.1
 """
-        print("创建了包含Apple和同花顺直连规则的最小化备用配置")
+        print("创建了包含Apple、同花顺直连以及Copilot分流的最小化备用配置")
 
     # 写入文件
     with open('custom_shadowrocket_rules.conf', 'w', encoding='utf-8') as f:
