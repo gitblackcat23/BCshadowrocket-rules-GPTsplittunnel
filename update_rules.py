@@ -142,12 +142,23 @@ try:
     rule_end = j_content.find('[', rule_start + 1)
     if rule_end == -1: rule_end = len(j_content)
 
+    # ... 前面代码保持不变 ...
+
     before_rules = j_content[:rule_start + 7]
     j_rules_raw = j_content[rule_start + 7:rule_end]
     after_rules = j_content[rule_end:]
 
+    # ================= 优化 DNS 配置 (新增部分) =================
+    # 使用正则表达式匹配 dns-server 行，并替换为包含腾讯、阿里 DoH 及腾讯传统 DNS 的组合
+    optimized_dns = "dns-server = https://dns.alidns.com/dns-query, https://doh.pub/dns-query, 119.29.29.29"
+    before_rules = re.sub(r'dns-server\s*=\s*.*', optimized_dns, before_rules)
+    print("-> 已优化 [General] 下的 dns-server 配置，添加传统 DNS 兜底")
+    # =========================================================
+
     # 清洗 Johnshall 自带的 FINAL 防止阻断后续流
     j_rules_clean = "\n".join([line for line in j_rules_raw.splitlines() if not line.startswith('FINAL,') and not line.startswith('MATCH,')])
+
+# ... 后续拼接逻辑保持不变 ...
 
     # 4. 构建国内直连 RULE-SET（带降级逻辑）
     domestic_rules_str = "\n# --- 国内常用 APP 及服务 (DIRECT) ---\n"
