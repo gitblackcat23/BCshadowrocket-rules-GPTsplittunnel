@@ -7,6 +7,8 @@ import re
 # ================= 基础配置 =================
 default_node = "V3(vless+vision+reality)"
 openai_node = "V3 Static Residential"
+# 新增：Claude 专用固定线路（建议与 OpenAI 共用或单独指定你的纯净 IP 节点名称）
+claude_node = "V3 Static Residential" 
 
 # 确保备份与缓存目录存在
 cache_dir = 'backups/rules_cache'
@@ -81,7 +83,6 @@ domestic_lists = {
 
 # ================= 核心网络与降级函数 =================
 def fetch_or_fallback(url, cache_path):
-    """尝试获取远程规则，若失败或遭遇删库，则读取本地缓存进行防失联接管"""
     try:
         response = requests.get(url, timeout=12)
         if response.status_code == 200:
@@ -91,7 +92,6 @@ def fetch_or_fallback(url, cache_path):
     except Exception:
         pass
     
-    # 触发容灾降级机制
     if os.path.exists(cache_path):
         with open(cache_path, 'r', encoding='utf-8') as f:
             return False, f.read()
@@ -127,40 +127,53 @@ try:
                 if line and not line.startswith('#'):
                     openai_rules_str += f"{line},{openai_node}\n"
         else:
-            # 极限兜底
+            # 极限兜底 (已按照你的要求完美修复)
             openai_rules_str += f"DOMAIN-KEYWORD,openai,{openai_node}\nDOMAIN-SUFFIX,openai.com,{openai_node}\n"
         openai_rules_str += "\n"
+
+    # ================= [新增部分] Claude 无死角分流逻辑 =================
+    claude_url = "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Claude/Claude.list"
+    is_cl_online, cl_content = fetch_or_fallback(claude_url, os.path.join(cache_dir, "Claude.list"))
+    
+    claude_rules_str = f"# Claude 全家桶 (使用节点: {claude_node})\n"
+    # A. 核心 UA 匹配 (针对 CLI 和 App)
+    claude_rules_str += f"USER-AGENT,Claude*,{claude_node}\n"
+    claude_rules_str += f"USER-AGENT,anthropic*,{claude_node}\n"
+    
+    # B. 核心域名后缀 (Artifacts/Cowork 必备)
+    claude_manual_domains = ['claude.ai', 'anthropic.com', 'claudeusercontent.com', 'statsigapi.net']
+    claude_rules_str += "".join([f"DOMAIN-SUFFIX,{d},{claude_node}\n" for d in claude_manual_domains])
+    claude_rules_str += f"DOMAIN-KEYWORD,claude,{claude_node}\n"
+
+    # C. 订阅 Rule-Set (补充库中可能存在的其他域名)
+    if is_cl_online:
+        claude_rules_str += f"RULE-SET,{claude_url},{claude_node}\n"
+        print("-> Claude 规则库在线，使用 RULE-SET 订阅")
+    else:
+        print("!> Claude 规则库失联，使用手动硬编码规则接管")
+    claude_rules_str += "\n"
+    # =================================================================
 
     # 3. 处理 Johnshall 基础与去广告规则
     johnshall_url = "https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf"
     is_j_online, j_content = fetch_or_fallback(johnshall_url, os.path.join(cache_dir, "johnshall_latest.conf"))
     if not j_content:
-        raise Exception("致命错误: Johnshall 规则拉取失败且无本地缓存，无法构建骨架。")
-    print(f"-> Johnshall 规则状态: {'在线' if is_j_online else '离线降级'}")
+        raise Exception("致命错误: Johnshall 规则拉取失败且无本地缓存。")
 
     rule_start = j_content.find('[Rule]')
     rule_end = j_content.find('[', rule_start + 1)
     if rule_end == -1: rule_end = len(j_content)
 
-    # ... 前面代码保持不变 ...
-
     before_rules = j_content[:rule_start + 7]
     j_rules_raw = j_content[rule_start + 7:rule_end]
     after_rules = j_content[rule_end:]
 
-    # ================= 优化 DNS 配置 (新增部分) =================
-    # 使用正则表达式匹配 dns-server 行，并替换为包含腾讯、阿里 DoH 及腾讯传统 DNS 的组合
     optimized_dns = "dns-server = https://dns.alidns.com/dns-query, https://doh.pub/dns-query, 119.29.29.29"
     before_rules = re.sub(r'dns-server\s*=\s*.*', optimized_dns, before_rules)
-    print("-> 已优化 [General] 下的 dns-server 配置，添加传统 DNS 兜底")
-    # =========================================================
 
-    # 清洗 Johnshall 自带的 FINAL 防止阻断后续流
     j_rules_clean = "\n".join([line for line in j_rules_raw.splitlines() if not line.startswith('FINAL,') and not line.startswith('MATCH,')])
 
-# ... 后续拼接逻辑保持不变 ...
-
-    # 4. 构建国内直连 RULE-SET（带降级逻辑）
+    # 4. 构建国内直连 RULE-SET
     domestic_rules_str = "\n# --- 国内常用 APP 及服务 (DIRECT) ---\n"
     for name, url in domestic_lists.items():
         is_dom_online, dom_content = fetch_or_fallback(url, os.path.join(cache_dir, f"{name}.list"))
@@ -174,12 +187,12 @@ try:
                     if line and not line.startswith('#'):
                         domestic_rules_str += f"{line},DIRECT\n"
 
-    # 5. 核心严格拼装顺序
-    # 顺序：最高优 -> 强制分流 -> Johnshall(顶部就是REJECT去广告) -> 宽泛国内直连 -> FINAL兜底
+    # 5. 核心严格拼装顺序 (Claude 规则紧跟 OpenAI)
     final_rules = (
         apple_rules_str + 
         tonghuashun_rules_str + 
         openai_rules_str + 
+        claude_rules_str +  # <<< Claude 插入此处
         copilot_rules_str + 
         "\n# --- Johnshall 去广告与基础代理区块 ---\n" +
         j_rules_clean +
@@ -200,5 +213,5 @@ try:
     print(f"[{datetime.datetime.now()}] 规则已成功重构并生成！")
 
 except Exception as e:
-    print(f"严重错误，配置构建中断: {e}", file=sys.stderr)
+    print(f"严重错误: {e}", file=sys.stderr)
     sys.exit(1)
