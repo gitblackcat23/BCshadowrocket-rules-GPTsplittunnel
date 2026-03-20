@@ -2,39 +2,40 @@ name: 规则源监控 (预警系统)
 
 on:
   schedule:
-    - cron: '0 12 * * *' 
+    - cron: '0 12 * * *'
   workflow_dispatch:
 
-# --- 关键：全局强制 Node 24 ---
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+permissions:
+  issues: write
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+
     steps:
       - name: 检查外部规则可用性
         id: check_rules
         run: |
+          # 检查 Johnshall 和 OpenAI 两个核心源
           J_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf)
           O_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/OpenAI/OpenAI.list)
-          C_CODE=$(curl -s -o /dev/now -w "%{http_code}" https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Claude/Claude.list)
-          
-          echo "Johnshall: $J_CODE, OpenAI: $O_CODE, Claude: $C_CODE"
-          
-          if [ "$J_CODE" != "200" ] || [ "$O_CODE" != "200" ] || [ "$C_CODE" != "200" ]; then
-            echo "status=failure" >> $GITHUB_OUTPUT
+
+          echo "Johnshall: $J_CODE, OpenAI: $O_CODE"
+
+          if [ "$J_CODE" != "200" ] || [ "$O_CODE" != "200" ]; then
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo "message=外部规则源访问异常！请注意：当前 update_rules.py 正在使用本地缓存维持运行。故障码 - Johnshall: $J_CODE, OpenAI: $O_CODE" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-      
+
       - name: 创建 GitHub Issue 提醒
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
-            github.rest.issues.create({
+            await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: '⚠️ 规则源故障预警：当前已触发降级方案',
-              body: `监控到上游源异常，Python 脚本已自动启用本地备份运行。\n\n时间: ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`
+              body: `监控到上游源异常，Python 脚本已自动启用本地备份运行。\n\n时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
             })
