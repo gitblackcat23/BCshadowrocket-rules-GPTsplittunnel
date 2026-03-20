@@ -1,32 +1,31 @@
 name: 自动更新规则并备份缓存
 
 on:
+  # 每天北京时间凌晨 4:00 自动运行 (UTC 20:00)
   schedule:
     - cron: '0 20 * * *'
+  # 允许手动触发执行
   workflow_dispatch:
 
-# 强制所有步骤使用 Node 24，作为双重保险
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
+# 必须开启写入权限，否则无法将变动 push 回仓库
 permissions:
   contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: 检出代码
-        # 升级到 v5 (2026 年主流版)，原生适配 Node 24
-        uses: actions/checkout@v5 
+        uses: actions/checkout@v5
         with:
+          # 获取完整历史，确保提交顺畅
           fetch-depth: 0
 
       - name: 设置 Python 环境
-        # 升级到 v6，彻底告别老旧 Node 环境
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
       - name: 安装依赖
         run: |
@@ -37,11 +36,12 @@ jobs:
           python update_rules.py
 
       - name: 自动提交变动 (包含缓存目录)
-        # 升级到 v6，解决所有内部 Node 20 引用
-        uses: stefanzweifel/git-auto-commit-action@v6
+        uses: stefanzweifel/git-auto-commit-action@v7
         with:
-          commit_message: "Auto-update rules (Modern Node 24 Environment) [skip ci]"
+          commit_message: "Auto-update rules and sync cache [skip ci]"
+          # 指定需要提交的文件和目录
           file_pattern: 'custom_shadowrocket_rules.conf backups/*'
-          skip_dirty_check: false    
+          # 如果没有文件变动，不报错也不提交
+          skip_dirty_check: false
           commit_user_name: github-actions[bot]
           commit_user_email: github-actions[bot]@users.noreply.github.com
