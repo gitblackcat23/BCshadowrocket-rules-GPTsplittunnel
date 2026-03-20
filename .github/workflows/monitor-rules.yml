@@ -5,34 +5,30 @@ on:
     - cron: '0 12 * * *' 
   workflow_dispatch:
 
+# --- 关键：全局强制 Node 24 ---
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    # --- 核心修改 1：开启 Node 24 环境开关 ---
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
     steps:
       - name: 检查外部规则可用性
         id: check_rules
         run: |
-          # 核心源清单：增加对 Claude 源的监控
           J_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf)
           O_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/OpenAI/OpenAI.list)
-          C_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Claude/Claude.list)
+          C_CODE=$(curl -s -o /dev/now -w "%{http_code}" https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Claude/Claude.list)
           
           echo "Johnshall: $J_CODE, OpenAI: $O_CODE, Claude: $C_CODE"
           
-          # 只要有一个源不是 200，就触发预警
           if [ "$J_CODE" != "200" ] || [ "$O_CODE" != "200" ] || [ "$C_CODE" != "200" ]; then
             echo "status=failure" >> $GITHUB_OUTPUT
-            echo "message=外部规则源访问异常！当前使用本地缓存维持运行。故障码 - Johnshall: $J_CODE, OpenAI: $O_CODE, Claude: $C_CODE" >> $GITHUB_OUTPUT
             exit 1
           fi
       
       - name: 创建 GitHub Issue 提醒
         if: failure()
-        # --- 核心修改 2：升级插件到 v7 以原生支持新环境 ---
         uses: actions/github-script@v7
         with:
           script: |
