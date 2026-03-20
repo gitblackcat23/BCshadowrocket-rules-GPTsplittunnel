@@ -5,7 +5,7 @@ on:
     - cron: '0 20 * * *'
   workflow_dispatch:
 
-# --- 关键：将环境变量提升到这里（全局作用域） ---
+# 强制所有步骤使用 Node 24，作为双重保险
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -17,12 +17,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        # 升级到 v5 (2026 年主流版)，原生适配 Node 24
+        uses: actions/checkout@v5 
         with:
           fetch-depth: 0
 
       - name: 设置 Python 环境
-        uses: actions/setup-python@v5
+        # 升级到 v6，彻底告别老旧 Node 环境
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -35,9 +37,10 @@ jobs:
           python update_rules.py
 
       - name: 自动提交变动 (包含缓存目录)
-        uses: stefanzweifel/git-auto-commit-action@v5
+        # 升级到 v6，解决所有内部 Node 20 引用
+        uses: stefanzweifel/git-auto-commit-action@v6
         with:
-          commit_message: "Auto-update rules and sync cache (Node 24) [skip ci]"
+          commit_message: "Auto-update rules (Modern Node 24 Environment) [skip ci]"
           file_pattern: 'custom_shadowrocket_rules.conf backups/*'
           skip_dirty_check: false    
           commit_user_name: github-actions[bot]
