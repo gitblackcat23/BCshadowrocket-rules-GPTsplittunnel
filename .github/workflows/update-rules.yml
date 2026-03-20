@@ -14,6 +14,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # --- 新增：强制启用 Node 24 环境，彻底消除警告 ---
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: 检出代码
@@ -25,7 +28,7 @@ jobs:
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11' # 顺手优化到 3.11，速度更快
 
       - name: 安装依赖
         run: |
@@ -36,10 +39,11 @@ jobs:
           python update_rules.py
 
       - name: 自动提交变动 (包含缓存目录)
+        # 这里建议保持 v5，配合上面的 env 开关即可消除警告
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Auto-update rules and sync cache [skip ci]"
-          # 指定需要提交的文件和目录
+          commit_message: "Auto-update rules and sync cache [skip ci] (Node 24)"
+          # 保留你的核心备份逻辑
           file_pattern: 'custom_shadowrocket_rules.conf backups/*'
           # 如果没有文件变动，不报错也不提交
           skip_dirty_check: false    
