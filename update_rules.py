@@ -140,10 +140,25 @@ try:
     claude_rules_str += f"USER-AGENT,Claude*,{claude_node}\n"
     claude_rules_str += f"USER-AGENT,anthropic*,{claude_node}\n"
     
-    # B. 核心域名后缀 (Artifacts/Cowork 必备)
-    claude_manual_domains = ['claude.ai', 'anthropic.com', 'claudeusercontent.com', 'statsigapi.net']
+    # B. 核心域名后缀 (Artifacts/Cowork 必备 + 新增极致防封补丁)
+    claude_manual_domains = [
+        # --- 原有保留 ---
+        'claude.ai', 'anthropic.com', 'claudeusercontent.com', 'statsigapi.net',
+        # --- 新增：人机验证与前端静态依赖 (防卡加载) ---
+        'hcaptcha.com', 'recaptcha.net', 'gstatic.com', 'cloudflare-static.com',
+        # --- 新增：高危遥测与后台统计 (防封核心) ---
+        'statsig.com', 'sentry.io', 'segment.io', 'datadoghq.com', 'browser-intake-datadoghq.com',
+        # --- 新增：支付与主控域名 ---
+        'unlimited-pay.anthropic.com'
+    ]
     claude_rules_str += "".join([f"DOMAIN-SUFFIX,{d},{claude_node}\n" for d in claude_manual_domains])
+    
+    # 新增精确匹配逻辑 (缩小遥测域名的误伤范围)
+    claude_rules_str += f"DOMAIN,statsigapi.net,{claude_node}\n"
+    
+    # 原有及新增的关键字匹配
     claude_rules_str += f"DOMAIN-KEYWORD,claude,{claude_node}\n"
+    claude_rules_str += f"DOMAIN-KEYWORD,anthropic,{claude_node}\n"
 
     # C. 订阅 Rule-Set (补充库中可能存在的其他域名)
     if is_cl_online:
