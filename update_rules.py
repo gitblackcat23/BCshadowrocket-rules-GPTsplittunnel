@@ -139,11 +139,18 @@ try:
     is_cl_online, cl_content = fetch_or_fallback(claude_url, os.path.join(cache_dir, "Claude.list"))
     
     claude_rules_str = f"# Claude 全家桶 (使用节点: {claude_node})\n"
-    # A. 核心 UA 匹配 (针对 CLI 和 App)
+
+    # A. Claude 精确探针域名，放在更宽泛规则之前，避免被后续兜底规则吞掉。
+    claude_exact_domains = [
+        'api64.ipify.org',
+    ]
+    claude_rules_str += "".join([f"DOMAIN,{d},{claude_node}\n" for d in claude_exact_domains])
+
+    # B. 核心 UA 匹配 (针对 CLI 和 App)
     claude_rules_str += f"USER-AGENT,Claude*,{claude_node}\n"
     claude_rules_str += f"USER-AGENT,anthropic*,{claude_node}\n"
     
-    # B. 核心域名后缀 (Artifacts/Cowork 必备 + 新增极致防封补丁)
+    # C. 核心域名后缀 (Artifacts/Cowork 必备 + 新增极致防封补丁)
     claude_manual_domains = [
         # --- 原有保留 ---
         'claude.ai', 'anthropic.com', 'claudeusercontent.com', 'statsigapi.net',
@@ -156,14 +163,14 @@ try:
     ]
     claude_rules_str += "".join([f"DOMAIN-SUFFIX,{d},{claude_node}\n" for d in claude_manual_domains])
     
-    # 新增精确匹配逻辑 (缩小遥测域名的误伤范围)
+    # D. 新增精确匹配逻辑 (缩小遥测域名的误伤范围)
     claude_rules_str += f"DOMAIN,statsigapi.net,{claude_node}\n"
     
-    # 原有及新增的关键字匹配
+    # E. 原有及新增的关键字匹配
     claude_rules_str += f"DOMAIN-KEYWORD,claude,{claude_node}\n"
     claude_rules_str += f"DOMAIN-KEYWORD,anthropic,{claude_node}\n"
 
-    # C. 订阅 Rule-Set (补充库中可能存在的其他域名)
+    # F. 订阅 Rule-Set (补充库中可能存在的其他域名)
     if is_cl_online:
         claude_rules_str += f"RULE-SET,{claude_url},{claude_node}\n"
         print("-> Claude 规则库在线，使用 RULE-SET 订阅")
