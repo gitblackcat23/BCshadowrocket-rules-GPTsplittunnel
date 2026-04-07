@@ -33,6 +33,9 @@ apple_domains = [
     'gsa.apple.com', 'iadsdk.apple.com', 'metrics.apple.com', 'wallet.apple.com',
     'weather-data.apple.com', 'api.weather.com', 'siri.apple.com', 'locationd.apple.com',
     'icloud-api.apple.com', 'mask.icloud.com', 'mask-h2.icloud.com', 'gateway.icloud.com',
+    # Explicit iCloud diagnostics and newer Apple hosts to keep Shadowrocket routing direct.
+    'gc.apple.com', 'icloud.apple.com', 'probe.icloud.com', 'pong.icloud.com',
+    'mask-api.icloud.com', 'metrics.icloud.com',
 ]
 
 tonghuashun_domains = [
@@ -183,10 +186,20 @@ try:
     j_rules_raw = j_content[rule_start + 7:rule_end]
     after_rules = j_content[rule_end:]
 
-    optimized_dns = "dns-server = https://dns.alidns.com/dns-query, https://doh.pub/dns-query, 119.29.29.29"
+    optimized_dns = "dns-server = https://dns.alidns.com/dns-query, https://doh.pub/dns-query"
     before_rules = re.sub(r'dns-server\s*=\s*.*', optimized_dns, before_rules)
 
-    j_rules_clean = "\n".join([line for line in j_rules_raw.splitlines() if not line.startswith('FINAL,') and not line.startswith('MATCH,')])
+    # Remove upstream entries that conflict with the explicit iCloud DIRECT policy above.
+    upstream_apple_conflicts = {
+        'DOMAIN-SUFFIX,icloud-cdn.icloud.com.akadns.net,Proxy',
+        'DOMAIN-SUFFIX,metrics.icloud.com,Reject',
+    }
+    j_rules_clean = "\n".join([
+        line for line in j_rules_raw.splitlines()
+        if not line.startswith('FINAL,')
+        and not line.startswith('MATCH,')
+        and line.strip() not in upstream_apple_conflicts
+    ])
 
     # 4. 构建国内直连 RULE-SET
     domestic_rules_str = "\n# --- 国内常用 APP 及服务 (DIRECT) ---\n"
