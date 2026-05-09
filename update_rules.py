@@ -36,6 +36,14 @@ apple_domains = [
     # Explicit iCloud diagnostics and newer Apple hosts to keep Shadowrocket routing direct.
     'gc.apple.com', 'icloud.apple.com', 'probe.icloud.com', 'pong.icloud.com',
     'mask-api.icloud.com', 'metrics.icloud.com',
+    # iCloud China/CNAME paths are required for reliable Notes and CloudKit sync.
+    'apzones.com', 'apple-icloud.cn', 'appleicloud.cn', 'icloud-apple.cn',
+    'icloud.cn', 'icloud.net.cn', 'icloudapple.cn',
+    'www-cdn.icloud.com.akadns.net',
+]
+
+apple_keywords = [
+    'icloud.com.akadns.net',
 ]
 
 tonghuashun_domains = [
@@ -107,6 +115,7 @@ try:
     # 1. 构建硬编码极高优先级 (Apple & 同花顺)
     apple_rules_str = f"# Apple & iCloud Services (DIRECT) - {datetime.datetime.now().strftime('%Y-%m-%d')}\n"
     apple_rules_str += "".join([f"DOMAIN-SUFFIX,{d},DIRECT\n" for d in apple_domains]) + "\n"
+    apple_rules_str += "".join([f"DOMAIN-KEYWORD,{d},DIRECT\n" for d in apple_keywords]) + "\n"
     
     tonghuashun_rules_str = f"# Tonghuashun (DIRECT) - {datetime.datetime.now().strftime('%Y-%m-%d')}\n"
     tonghuashun_rules_str += "".join([f"DOMAIN-SUFFIX,{d},DIRECT\n" for d in tonghuashun_domains]) + "\n"
@@ -199,6 +208,7 @@ try:
     # Remove upstream entries that conflict with the explicit iCloud DIRECT policy above.
     upstream_apple_conflicts = {
         'DOMAIN-SUFFIX,icloud-cdn.icloud.com.akadns.net,Proxy',
+        'DOMAIN-SUFFIX,www-cdn.icloud.com.akadns.net,Proxy',
         'DOMAIN-SUFFIX,metrics.icloud.com,Reject',
     }
     j_rules_clean = "\n".join([
