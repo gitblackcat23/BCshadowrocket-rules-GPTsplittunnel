@@ -1,4 +1,4 @@
-name: 自动更新规则并备份缓存
+name: 自动更新规则并同步缓存
 
 on:
   # 每天北京时间 08:08 自动运行（UTC 00:08）
@@ -23,13 +23,13 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           # 获取完整历史，确保提交顺畅
           fetch-depth: 0
 
       - name: 设置 Python 环境
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.10'
 
@@ -43,18 +43,18 @@ jobs:
 
       - name: 执行更新脚本
         run: |
-          python update_rules.py
+          python update_rules.py --no-backup
 
       - name: 校验生成后的规则文件
         run: |
           python update_rules.py --validate-config custom_shadowrocket_rules.conf
 
       - name: 自动提交变动 (包含缓存目录)
-        uses: stefanzweifel/git-auto-commit-action@v7
+        uses: stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d # v7
         with:
           commit_message: "Auto-update rules and sync cache [skip ci]"
-          # 同步最终配置、备份、各来源缓存和可审计的 OpenAI 生成产物
-          file_pattern: 'custom_shadowrocket_rules.conf backups/* backups/rules_cache/* rules/openai/*'
+          # CI 依赖 Git 历史，不再新增时间戳备份；只同步最终配置、缓存和审计产物。
+          file_pattern: 'custom_shadowrocket_rules.conf backups/rules_cache/* rules/openai/*'
           # 如果没有文件变动，不报错也不提交
           skip_dirty_check: false
           commit_user_name: github-actions[bot]
