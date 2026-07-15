@@ -1,0 +1,5 @@
+# Compact provider fixture used for online and cached builds.
+DOMAIN-SUFFIX,fixture.example
+DOMAIN,api.fixture.example
+IP-CIDR,192.0.2.1/32,no-resolve
+IP-ASN,64500,no-resolve

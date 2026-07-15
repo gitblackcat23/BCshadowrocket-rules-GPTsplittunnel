@@ -1,9 +1,9 @@
 name: 自动更新规则并备份缓存
 
 on:
-  # 每天北京时间 08:05 自动运行（UTC 00:05）
+  # 每天北京时间 08:08 自动运行（UTC 00:08）
   schedule:
-    - cron: '5 0 * * *'
+    - cron: '8 0 * * *'
   # 允许手动触发执行
   workflow_dispatch:
 
@@ -11,9 +11,15 @@ on:
 permissions:
   contents: write
 
+# 同一分支的定时与手动更新串行执行，避免并发写入规则和缓存。
+concurrency:
+  group: update-rules-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: 检出代码
@@ -29,11 +35,19 @@ jobs:
 
       - name: 安装依赖
         run: |
-          pip install requests
+          python -m pip install --requirement requirements.txt
+
+      - name: 运行生成器单元测试
+        run: |
+          python -m unittest discover -s tests -v
 
       - name: 执行更新脚本
         run: |
           python update_rules.py
+
+      - name: 校验生成后的规则文件
+        run: |
+          python update_rules.py --validate-config custom_shadowrocket_rules.conf
 
       - name: 自动提交变动 (包含缓存目录)
         uses: stefanzweifel/git-auto-commit-action@v7
