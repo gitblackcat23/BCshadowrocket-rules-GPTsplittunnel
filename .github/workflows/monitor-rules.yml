@@ -44,9 +44,6 @@ jobs:
           v2fly_code=$(fetch \
             'https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/openai' \
             "$work_dir/v2fly-openai")
-          voice_code=$(fetch \
-            'https://openai.com/chatgpt-voice.json' \
-            "$work_dir/chatgpt-voice.json")
 
           failures=()
 
@@ -59,16 +56,7 @@ jobs:
           if [ "$v2fly_code" != '200' ] || ! grep -Eq '(^|[.:])openai\.com([[:space:]]|$)' "$work_dir/v2fly-openai"; then
             failures+=("v2fly OpenAI：HTTP ${v2fly_code:-000} 或缺少 openai.com")
           fi
-          if [ "$voice_code" != '200' ] || ! jq -e '
-            .prefixes
-            | type == "array"
-              and length > 0
-              and all(.[]; ((.ipv4Prefix? // .ipv6Prefix? // "") | type == "string" and length > 0))
-          ' "$work_dir/chatgpt-voice.json" >/dev/null 2>&1; then
-            failures+=("OpenAI Voice：HTTP ${voice_code:-000} 或 prefixes 为空/无效")
-          fi
-
-          echo "Johnshall: $johnshall_code, VPSDance: $vpsdance_code, v2fly: $v2fly_code, Voice: $voice_code"
+          echo "Johnshall: $johnshall_code, VPSDance: $vpsdance_code, v2fly: $v2fly_code"
 
           if [ "${#failures[@]}" -gt 0 ]; then
             {

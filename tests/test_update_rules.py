@@ -1,5 +1,4 @@
 import datetime
-import json
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -62,9 +61,6 @@ class RuleGeneratorTests(unittest.TestCase):
         cls.openai_v2fly_content = (FIXTURES / "openai_v2fly.txt").read_text(
             encoding="utf-8"
         )
-        cls.openai_voice_content = (FIXTURES / "openai_voice.json").read_text(
-            encoding="utf-8"
-        )
 
     def online_response(self, url, timeout, johnshall_content=None):
         self.assertEqual(timeout, rules.SOURCE_TIMEOUT_SECONDS)
@@ -72,8 +68,6 @@ class RuleGeneratorTests(unittest.TestCase):
             return FakeResponse(self.openai_vps_content)
         if url == rules.openai_v2fly_url:
             return FakeResponse(self.openai_v2fly_content)
-        if url == rules.openai_voice_url:
-            return FakeResponse(self.openai_voice_content, content_type="application/json")
         if url == rules.johnshall_url:
             return FakeResponse(johnshall_content or self.johnshall_content)
         return FakeResponse(self.provider_content)
@@ -96,9 +90,6 @@ class RuleGeneratorTests(unittest.TestCase):
         )
         (cache_dir / "OpenAI_v2fly.txt").write_text(
             self.openai_v2fly_content, encoding="utf-8"
-        )
-        (cache_dir / "OpenAI_voice.json").write_text(
-            self.openai_voice_content, encoding="utf-8"
         )
         (cache_dir / "Claude.list").write_text(self.provider_content, encoding="utf-8")
         (cache_dir / "johnshall_latest.conf").write_text(
@@ -192,53 +183,6 @@ class RuleGeneratorTests(unittest.TestCase):
             with self.subTest(label=label), self.assertRaises(rules.RuleValidationError):
                 rules.v2fly_openai_rule_lines(content, f"Invalid v2fly {label}")
 
-    def test_voice_json_converts_public_ipv4_and_ipv6_single_hosts(self):
-        creation_time, voice_rules = rules.voice_openai_rule_lines(
-            self.openai_voice_content
-        )
-        self.assertEqual(creation_time, "2026-07-16T00:00:00Z")
-        self.assertEqual(
-            voice_rules,
-            [
-                "IP-CIDR,20.20.20.20/32,no-resolve",
-                "IP-CIDR6,2606:4700::1/128,no-resolve",
-            ],
-        )
-        self.assertEqual(
-            rules.validate_voice_openai_content(
-                self.openai_voice_content, "Voice fixture"
-            ),
-            2,
-        )
-
-    def test_voice_json_rejects_malformed_empty_unsafe_or_non_host_prefixes(self):
-        def voice_payload(prefixes, creation_time="2026-07-16T00:00:00Z"):
-            return json.dumps({"creationTime": creation_time, "prefixes": prefixes})
-
-        invalid = {
-            "malformed JSON": "{",
-            "empty prefixes": voice_payload([]),
-            "missing timezone": voice_payload(
-                [{"ipv4Prefix": "20.20.20.20/32"}], "2026-07-16T00:00:00"
-            ),
-            "IPv4 broad range": voice_payload([{"ipv4Prefix": "20.20.20.0/24"}]),
-            "IPv6 broad range": voice_payload([{"ipv6Prefix": "2606:4700::/48"}]),
-            "wrong family": voice_payload([{"ipv4Prefix": "2606:4700::1/128"}]),
-            "non-public": voice_payload([{"ipv4Prefix": "192.0.2.1/32"}]),
-            "extra field": voice_payload(
-                [{"ipv4Prefix": "20.20.20.20/32", "description": "unexpected"}]
-            ),
-            "duplicate": voice_payload(
-                [
-                    {"ipv4Prefix": "20.20.20.20/32"},
-                    {"ipv4Prefix": "20.20.20.20/32"},
-                ]
-            ),
-        }
-        for label, content in invalid.items():
-            with self.subTest(label=label), self.assertRaises(rules.RuleValidationError):
-                rules.voice_openai_rule_lines(content, f"Invalid Voice {label}")
-
     def test_merge_deduplicates_exact_rules_but_preserves_semantic_overlap(self):
         merged = rules.merge_openai_rule_lines(
             [
@@ -267,7 +211,7 @@ class RuleGeneratorTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(rules.RuleValidationError, "低于安全下限"):
                 rules.validate_merged_openai_rules(
-                    ["DOMAIN,a.example", "DOMAIN,b.example"], [], []
+                    ["DOMAIN,a.example", "DOMAIN,b.example"], []
                 )
 
         required = {"DOMAIN,required.example", "DOMAIN-SUFFIX,sentinel.example"}
@@ -277,15 +221,14 @@ class RuleGeneratorTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(rules.RuleValidationError, "缺少哨兵项"):
                 rules.validate_merged_openai_rules(
-                    ["DOMAIN,required.example"], [], []
+                    ["DOMAIN,required.example"], []
                 )
 
-            valid = sorted(required | {"IP-CIDR,20.20.20.20/32,no-resolve"})
+            valid = sorted(required | {"DOMAIN,baseline.example"})
             self.assertEqual(
                 rules.validate_merged_openai_rules(
                     valid,
-                    ["DOMAIN,required.example"],
-                    ["IP-CIDR,20.20.20.20/32,no-resolve"],
+                    ["DOMAIN,required.example", "DOMAIN,baseline.example"],
                 ),
                 3,
             )
@@ -316,7 +259,7 @@ class RuleGeneratorTests(unittest.TestCase):
                 self.assertEqual(content, self.provider_content)
                 self.assertEqual(cache_path.read_bytes(), original_bytes)
 
-    def test_each_openai_source_uses_its_own_last_known_good_cache(self):
+    def test_each_dynamic_openai_source_uses_its_own_last_known_good_cache(self):
         sources = [
             (
                 rules.openai_vps_url,
@@ -331,13 +274,6 @@ class RuleGeneratorTests(unittest.TestCase):
                 "OpenAI v2fly",
                 rules.validate_v2fly_openai_content,
                 self.openai_v2fly_content,
-            ),
-            (
-                rules.openai_voice_url,
-                "OpenAI_voice.json",
-                "OpenAI Voice",
-                rules.validate_voice_openai_content,
-                self.openai_voice_content,
             ),
         ]
         for url, filename, source_name, validator, expected in sources:
@@ -388,10 +324,15 @@ class RuleGeneratorTests(unittest.TestCase):
                 generated_openai_path.read_text(encoding="utf-8"),
                 (cache_dir / "OpenAI.list").read_text(encoding="utf-8"),
             )
+            openai_audit = generated_openai_path.read_text(encoding="utf-8")
             self.assertIn(
-                "# Voice creationTime: 2026-07-16T00:00:00Z",
-                generated_openai_path.read_text(encoding="utf-8"),
+                "# Sources: conservative baseline + official domain overlay + "
+                "VPSDance + v2fly",
+                openai_audit,
             )
+            self.assertNotIn("Voice creationTime", openai_audit)
+            self.assertNotIn("chatgpt-voice.json", openai_audit)
+            self.assertFalse((cache_dir / "OpenAI_voice.json").exists())
 
             ordered_markers = [
                 "# Apple & iCloud Services (DIRECT)",
@@ -411,7 +352,6 @@ class RuleGeneratorTests(unittest.TestCase):
             for source_url in (
                 rules.openai_vps_url,
                 rules.openai_v2fly_url,
-                rules.openai_voice_url,
             ):
                 self.assertNotIn(source_url, generated)
             self.assertIn(
@@ -424,12 +364,10 @@ class RuleGeneratorTests(unittest.TestCase):
                 f"DOMAIN-KEYWORD,chatgpt-async-webps-prod-,{rules.openai_node}",
                 openai_block,
             )
+            self.assertNotIn("20.20.20.20/32", openai_block)
+            self.assertNotIn("2606:4700::1/128", openai_block)
             self.assertIn(
-                f"IP-CIDR,20.20.20.20/32,{rules.openai_node},no-resolve",
-                openai_block,
-            )
-            self.assertIn(
-                f"IP-CIDR6,2606:4700::1/128,{rules.openai_node},no-resolve",
+                f"DOMAIN-SUFFIX,chatgpt.livekit.cloud,{rules.openai_node}",
                 openai_block,
             )
             self.assertNotIn("IP-ASN,20473", openai_block)
@@ -492,12 +430,10 @@ class RuleGeneratorTests(unittest.TestCase):
 
             self.assertNotIn("RULE-SET,", generated)
             self.assertNotIn("IP-ASN,20473", generated)
+            self.assertNotIn("20.20.20.20/32", generated)
+            self.assertNotIn("2606:4700::1/128", generated)
             self.assertIn(
-                f"IP-CIDR,20.20.20.20/32,{rules.openai_node},no-resolve",
-                generated,
-            )
-            self.assertIn(
-                f"IP-CIDR6,2606:4700::1/128,{rules.openai_node},no-resolve",
+                f"DOMAIN-SUFFIX,turn.livekit.cloud,{rules.openai_node}",
                 generated,
             )
             self.assertEqual(
@@ -668,9 +604,6 @@ class RuleGeneratorTests(unittest.TestCase):
                 + self.openai_vps_content,
                 cache_dir / "OpenAI_v2fly.txt": "# old v2fly cache sentinel\n"
                 + self.openai_v2fly_content,
-                cache_dir / "OpenAI_voice.json": self.openai_voice_content.replace(
-                    "{", "{\n  \"oldCacheSentinel\": true,", 1
-                ),
                 cache_dir / "OpenAI.list": "old merged cache sentinel\n",
                 generated_openai_path: "old generated audit sentinel\n",
                 cache_dir / "johnshall_latest.conf": self.johnshall_content,

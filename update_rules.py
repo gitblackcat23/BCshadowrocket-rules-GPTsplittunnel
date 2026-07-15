@@ -2,7 +2,6 @@ import argparse
 import datetime
 import hashlib
 import ipaddress
-import json
 import os
 import re
 import sys
@@ -34,12 +33,11 @@ MIN_JOHNSHALL_RULES = 10_000
 MIN_GENERATED_RULES = 10_000
 
 # Audited active-rule counts for known-good sources. Existing source counts were
-# established at commit 85ef191; the three OpenAI source counts were reviewed on
+# established at commit 85ef191; the two dynamic OpenAI source counts were reviewed on
 # 2026-07-16. Crossing the 50%-200% envelope requires an explicit baseline review.
 SOURCE_BASELINE_RULE_COUNTS = {
     "OpenAI VPSDance": 45,
     "OpenAI v2fly": 23,
-    "OpenAI Voice": 23,
     "Claude": 3,
     "WeChat": 33,
     "WeType": 1,
@@ -92,7 +90,7 @@ GENERATED_RULE_TYPES = PROVIDER_RULE_TYPES | {
 # intentionally removes MATCH/FINAL and writes its own single FINAL.
 JOHNSHALL_RULE_TYPES = GENERATED_RULE_TYPES | {"MATCH"}
 
-OPENAI_MIN_MERGED_RULES = 80
+OPENAI_MIN_MERGED_RULES = 65
 OPENAI_V2FLY_REGEX_RULES = {
     r"^chatgpt-async-webps-prod-\S+-\d+\.webpubsub\.azure\.com$": (
         "DOMAIN-KEYWORD,chatgpt-async-webps-prod-"
@@ -208,7 +206,6 @@ domestic_lists = {
 
 openai_vps_url = "https://raw.githubusercontent.com/VPSDance/ai-proxy-rules/main/rules/shadowrocket/openai.list"
 openai_v2fly_url = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/openai"
-openai_voice_url = "https://openai.com/chatgpt-voice.json"
 claude_url = "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Claude/Claude.list"
 johnshall_url = "https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf"
 
@@ -534,78 +531,6 @@ def validate_v2fly_openai_content(content, source_name, baseline_count=None, con
     return len(lines)
 
 
-def voice_openai_rule_lines(content, source_name="OpenAI Voice"):
-    _reject_empty_or_html(content, source_name, "application/json")
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise RuleValidationError(f"{source_name}: Voice JSON 格式不合法") from exc
-
-    if not isinstance(payload, dict) or not isinstance(payload.get("creationTime"), str):
-        raise RuleValidationError(f"{source_name}: 缺少合法的 creationTime")
-    creation_time = payload["creationTime"]
-    if any(ord(character) < 32 for character in creation_time):
-        raise RuleValidationError(f"{source_name}: creationTime 含控制字符")
-    try:
-        parsed_creation_time = datetime.datetime.fromisoformat(
-            creation_time.replace("Z", "+00:00")
-        )
-    except ValueError as exc:
-        raise RuleValidationError(f"{source_name}: creationTime 不是 RFC3339 时间") from exc
-    if parsed_creation_time.tzinfo is None:
-        raise RuleValidationError(f"{source_name}: creationTime 缺少时区")
-    prefixes = payload.get("prefixes")
-    if not isinstance(prefixes, list) or not prefixes:
-        raise RuleValidationError(f"{source_name}: prefixes 为空或不是列表")
-
-    rules = []
-    for index, item in enumerate(prefixes, start=1):
-        if not isinstance(item, dict) or set(item) not in ({"ipv4Prefix"}, {"ipv6Prefix"}):
-            raise RuleValidationError(
-                f"{source_name}: prefixes[{index}] 必须且只能包含一个 IPv4/IPv6 前缀"
-            )
-        key = next(iter(item))
-        value = item[key]
-        if not isinstance(value, str):
-            raise RuleValidationError(f"{source_name}: prefixes[{index}] 不是字符串")
-        try:
-            network = ipaddress.ip_network(value, strict=True)
-        except ValueError as exc:
-            raise RuleValidationError(
-                f"{source_name}: prefixes[{index}] CIDR 不合法 {value!r}"
-            ) from exc
-        expected_version = 4 if key == "ipv4Prefix" else 6
-        host_prefix_length = 32 if expected_version == 4 else 128
-        if (
-            network.version != expected_version
-            or not network.is_global
-            or network.prefixlen != host_prefix_length
-        ):
-            raise RuleValidationError(
-                f"{source_name}: prefixes[{index}] 必须是公网单主机 "
-                f"IPv{expected_version} /{host_prefix_length}"
-            )
-        rule_type = "IP-CIDR" if network.version == 4 else "IP-CIDR6"
-        rules.append(f"{rule_type},{network},no-resolve")
-
-    if len(set(rules)) != len(rules):
-        raise RuleValidationError(f"{source_name}: Voice JSON 含重复网段")
-    return creation_time, rules
-
-
-def validate_voice_openai_content(content, source_name, baseline_count=None, content_type=""):
-    _reject_empty_or_html(content, source_name, content_type)
-    _, rules = voice_openai_rule_lines(content, source_name)
-    canonical_source_name = source_name.removesuffix(" 本地缓存")
-    audited_baseline = SOURCE_BASELINE_RULE_COUNTS.get(canonical_source_name)
-    _check_rule_count_ratio(
-        source_name,
-        len(rules),
-        baseline_count if baseline_count is not None else audited_baseline,
-    )
-    return len(rules)
-
-
 def local_openai_rule_lines(path, source_name):
     content = read_text_strict(path, source_name)
     validate_provider_content(content, source_name)
@@ -643,7 +568,7 @@ def merge_openai_rule_lines(*rule_groups):
     )
 
 
-def validate_merged_openai_rules(lines, baseline_rules, voice_rules):
+def validate_merged_openai_rules(lines, baseline_rules):
     rules = set(lines)
     if len(lines) != len(rules):
         raise RuleValidationError("OpenAI 合并规则仍含文本重复项")
@@ -658,19 +583,15 @@ def validate_merged_openai_rules(lines, baseline_rules, voice_rules):
     missing_baseline = sorted(set(baseline_rules) - rules)
     if missing_baseline:
         raise RuleValidationError(f"OpenAI 合并规则缩减了固定兼容底座: {missing_baseline}")
-    missing_voice = sorted(set(voice_rules) - rules)
-    if missing_voice:
-        raise RuleValidationError(f"OpenAI 合并规则缺少官方 Voice 网段: {missing_voice}")
     if any(line.startswith("IP-ASN,20473,") or line == "IP-ASN,20473" for line in lines):
         raise RuleValidationError("OpenAI 合并规则禁止包含共享托管 ASN 20473")
     return len(lines)
 
 
-def render_openai_provider(lines, voice_creation_time):
+def render_openai_provider(lines):
     return (
         "# BC OpenAI merged provider\n"
-        "# Sources: conservative baseline + VPSDance + v2fly + OpenAI official\n"
-        f"# Voice creationTime: {voice_creation_time}\n"
+        "# Sources: conservative baseline + official domain overlay + VPSDance + v2fly\n"
         f"# Rule count: {len(lines)}\n\n"
         + "\n".join(lines)
         + "\n"
@@ -901,26 +822,14 @@ def build_openai_provider(cache_dir, pending_cache_updates, generated_path):
         raise RuleValidationError("OpenAI v2fly 在线内容和本地缓存都不可用")
     v2fly_rules = v2fly_openai_rule_lines(v2fly_content)
 
-    voice_online, voice_content = fetch_or_fallback(
-        openai_voice_url,
-        cache_dir / "OpenAI_voice.json",
-        "OpenAI Voice",
-        validate_voice_openai_content,
-        pending_cache_updates,
-    )
-    if voice_content is None:
-        raise RuleValidationError("OpenAI Voice 在线内容和本地缓存都不可用")
-    voice_creation_time, voice_rules = voice_openai_rule_lines(voice_content)
-
     merged_rules = merge_openai_rule_lines(
         baseline_rules,
         official_rules,
         vps_rules,
         v2fly_rules,
-        voice_rules,
     )
-    validate_merged_openai_rules(merged_rules, baseline_rules, voice_rules)
-    rendered_provider = render_openai_provider(merged_rules, voice_creation_time)
+    validate_merged_openai_rules(merged_rules, baseline_rules)
+    rendered_provider = render_openai_provider(merged_rules)
 
     pending_cache_updates.append((cache_dir / "OpenAI.list", rendered_provider))
     pending_cache_updates.append((Path(generated_path), rendered_provider))
@@ -930,14 +839,13 @@ def build_openai_provider(cache_dir, pending_cache_updates, generated_path):
         [
             f"VPSDance={'online' if vps_online else 'cache'}",
             f"v2fly={'online' if v2fly_online else 'cache'}",
-            f"Voice={'online' if voice_online else 'cache'}",
         ]
     )
     print(
         "-> OpenAI 合并完成: "
         f"baseline={len(baseline_rules)}, official={len(official_rules)}, "
         f"VPSDance={len(vps_rules)}, v2fly={len(v2fly_rules)}, "
-        f"Voice={len(voice_rules)}, merged={len(merged_rules)}, "
+        f"merged={len(merged_rules)}, "
         f"sha256={digest}, {source_modes}"
     )
     return merged_rules
