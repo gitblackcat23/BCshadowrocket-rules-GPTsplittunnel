@@ -131,6 +131,12 @@ copilot_domains = [
     "origin-tracker.githubusercontent.com",
 ]
 
+# OpenAI dependencies that must keep the same high-priority residential route
+# even when the upstream RULE-SET is online, stale, or replaced by local cache.
+openai_manual_domains = [
+    "oaistatsig.com",
+]
+
 # 国内外链规则字典
 domestic_lists = {
     "WeChat": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/WeChat/WeChat.list",
@@ -614,6 +620,10 @@ def build_config(
         raise RuleValidationError("OpenAI 在线内容和本地缓存都不可用，保留现有配置")
 
     openai_rules_str = f"# OpenAI (使用节点: {openai_node})\n"
+    openai_rules_str += "".join([
+        f"DOMAIN-SUFFIX,{domain},{openai_node}\n"
+        for domain in openai_manual_domains
+    ])
     if is_online:
         openai_rules_str += f"RULE-SET,{openai_url},{openai_node}\n\n"
         print("-> OpenAI 规则库在线，使用 RULE-SET 订阅")

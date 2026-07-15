@@ -13,6 +13,30 @@ import update_rules as rules
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def first_embedded_domain_policy(config, hostname):
+    """Return the first locally embedded domain rule policy for hostname."""
+    _, _, rule_block = rules._johnshall_rule_block(config, "Generated fixture")
+    hostname = hostname.lower().rstrip(".")
+
+    for raw_line in rule_block.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [part.strip() for part in line.split(",")]
+        rule_type = parts[0].upper()
+        if rule_type == "DOMAIN" and hostname == parts[1].lower().rstrip("."):
+            return parts[2]
+        if rule_type == "DOMAIN-SUFFIX":
+            suffix = parts[1].lower().rstrip(".")
+            if hostname == suffix or hostname.endswith(f".{suffix}"):
+                return parts[2]
+        if rule_type == "DOMAIN-KEYWORD" and parts[1].lower() in hostname:
+            return parts[2]
+        if rule_type == "FINAL":
+            return parts[1]
+    return None
+
+
 class FakeResponse:
     def __init__(self, content, status_code=200, content_type="text/plain; charset=utf-8"):
         self.content = content.encode("utf-8") if isinstance(content, str) else content
@@ -96,12 +120,11 @@ class RuleGeneratorTests(unittest.TestCase):
             self.assertEqual(output_path.read_text(encoding="utf-8"), generated)
             expected_backup = backup_dir / "custom_rules_20260715_123456.conf"
             self.assertEqual(expected_backup.read_text(encoding="utf-8"), generated)
-            # Golden SHA was produced by origin/main's pre-hardening generator
-            # with these exact fixtures on 2026-07-15. It locks the normal
-            # online output to byte-for-byte compatibility.
+            # Golden SHA locks the approved oaistatsig addition and all other
+            # normal online output to byte-for-byte compatibility.
             self.assertEqual(
                 hashlib.sha256(generated.encode("utf-8")).hexdigest(),
-                "5e132dc5bd06f957fed97582becc4e420a24f76bb4e6c77a058d716420a20fbc",
+                "055c03dfa27612cfd982727b5d270302b3c27706f74f78440618b32bd7c6971e",
             )
 
             ordered_markers = [
@@ -119,6 +142,36 @@ class RuleGeneratorTests(unittest.TestCase):
 
             self.assertIn(f"RULE-SET,{rules.openai_url},{rules.openai_node}", generated)
             self.assertIn(f"RULE-SET,{rules.claude_url},{rules.claude_node}", generated)
+            oaistatsig_rule = (
+                f"DOMAIN-SUFFIX,{rules.openai_manual_domains[0]},{rules.openai_node}"
+            )
+            self.assertEqual(generated.count(oaistatsig_rule), 1)
+            self.assertLess(
+                generated.index(oaistatsig_rule),
+                generated.index(f"RULE-SET,{rules.openai_url},{rules.openai_node}"),
+            )
+            self.assertEqual(
+                first_embedded_domain_policy(generated, "oaistatsig.com"),
+                rules.openai_node,
+            )
+            self.assertEqual(
+                first_embedded_domain_policy(generated, "events.oaistatsig.com"),
+                rules.openai_node,
+            )
+            # Existing high-priority policies remain first-match compatible.
+            self.assertEqual(first_embedded_domain_policy(generated, "apple.com"), "DIRECT")
+            self.assertEqual(
+                first_embedded_domain_policy(generated, "quote.10jqka.com.cn"),
+                "DIRECT",
+            )
+            self.assertEqual(
+                first_embedded_domain_policy(generated, "claude.ai"),
+                rules.claude_node,
+            )
+            self.assertEqual(
+                first_embedded_domain_policy(generated, rules.copilot_domains[0]),
+                rules.openai_node,
+            )
             self.assertIn(
                 f"DOMAIN,{rules.copilot_domains[0]},{rules.openai_node}", generated
             )
@@ -128,6 +181,7 @@ class RuleGeneratorTests(unittest.TestCase):
             self.assertIn("DOMAIN-SUFFIX,foreign.fixture.example,Proxy", generated)
             self.assertTrue(generated.rstrip().endswith("hostname = fixture.example"))
             self.assertIn(f"FINAL,{rules.default_node}", generated)
+            self.assertEqual(generated.upper().count("\nFINAL,"), 1)
             self.assertNotIn(",no-resolve,DIRECT", generated)
             self.assertNotIn(f",no-resolve,{rules.openai_node}", generated)
 
@@ -167,6 +221,41 @@ class RuleGeneratorTests(unittest.TestCase):
                 )
 
             self.assertNotIn("RULE-SET,", generated)
+            oaistatsig_rule = (
+                f"DOMAIN-SUFFIX,{rules.openai_manual_domains[0]},{rules.openai_node}"
+            )
+            self.assertEqual(generated.count(oaistatsig_rule), 1)
+            self.assertLess(
+                generated.index(oaistatsig_rule),
+                generated.index(
+                    f"DOMAIN-SUFFIX,fixture.example,{rules.openai_node}"
+                ),
+            )
+            self.assertEqual(
+                first_embedded_domain_policy(generated, "oaistatsig.com"),
+                rules.openai_node,
+            )
+            self.assertEqual(
+                first_embedded_domain_policy(generated, "events.oaistatsig.com"),
+                rules.openai_node,
+            )
+            self.assertEqual(
+                first_embedded_domain_policy(generated, "unrelatedstatsig.com"),
+                rules.default_node,
+            )
+            self.assertEqual(first_embedded_domain_policy(generated, "apple.com"), "DIRECT")
+            self.assertEqual(
+                first_embedded_domain_policy(generated, "quote.10jqka.com.cn"),
+                "DIRECT",
+            )
+            self.assertEqual(
+                first_embedded_domain_policy(generated, "claude.ai"),
+                rules.claude_node,
+            )
+            self.assertEqual(
+                first_embedded_domain_policy(generated, rules.copilot_domains[0]),
+                rules.openai_node,
+            )
             self.assertIn(
                 f"IP-CIDR,192.0.2.1/32,{rules.openai_node},no-resolve", generated
             )
@@ -181,6 +270,7 @@ class RuleGeneratorTests(unittest.TestCase):
                     self.assertIn(f"# {name} (降级使用本地缓存内联)", generated)
             self.assertNotIn(",no-resolve,DIRECT", generated)
             self.assertNotIn(f",no-resolve,{rules.openai_node}", generated)
+            self.assertEqual(generated.upper().count("\nFINAL,"), 1)
 
     def test_missing_online_source_and_cache_fails_without_changing_output(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
