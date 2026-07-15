@@ -1,0 +1,34 @@
+# OpenAI official network compatibility overlay, audited 2026-07-16.
+# Source: https://help.openai.com/en/articles/9247338
+# humb.apple.com deliberately remains covered by the earlier Apple DIRECT policy.
+
+DOMAIN-SUFFIX,auth.openai.com
+DOMAIN-SUFFIX,chatgpt.com
+DOMAIN-SUFFIX,ct.sendgrid.net
+DOMAIN-SUFFIX,intercom.io
+DOMAIN-SUFFIX,intercomcdn.com
+DOMAIN-SUFFIX,oaistatic.com
+DOMAIN-SUFFIX,oaiusercontent.com
+DOMAIN-SUFFIX,openai.com
+DOMAIN-SUFFIX,oaistatsig.com
+
+DOMAIN,android.chat.openai.com
+DOMAIN,auth0.openai.com
+DOMAIN,cdn.openaimerge.com
+DOMAIN,cdn.workos.com
+DOMAIN,challenges.cloudflare.com
+DOMAIN,chat.openai.com
+DOMAIN,desktop.chat.openai.com
+DOMAIN,forwarder.workos.com
+DOMAIN,images.workoscdn.com
+DOMAIN,ios.chat.openai.com
+DOMAIN,js.intercomcdn.com
+DOMAIN,js.stripe.com
+DOMAIN,o207216.ingest.sentry.io
+DOMAIN,o33249.ingest.sentry.io
+DOMAIN,rum.browser-intake-datadoghq.com
+DOMAIN,setup.auth.openai.com
+DOMAIN,setup.workos.com
+DOMAIN,tcr9i.chat.openai.com
+DOMAIN,workos.imgix.net
+DOMAIN,ws.chatgpt.com

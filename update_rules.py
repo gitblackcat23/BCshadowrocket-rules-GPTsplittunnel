@@ -1,6 +1,8 @@
 import argparse
 import datetime
+import hashlib
 import ipaddress
+import json
 import os
 import re
 import sys
@@ -20,17 +22,24 @@ claude_node = "V3 Static Residential"
 DEFAULT_CACHE_DIR = Path("backups/rules_cache")
 DEFAULT_BACKUP_DIR = Path("backups")
 DEFAULT_OUTPUT_PATH = Path("custom_shadowrocket_rules.conf")
+REPOSITORY_DIR = Path(__file__).resolve().parent
+OPENAI_RULES_DIR = REPOSITORY_DIR / "rules/openai"
+OPENAI_COMPATIBILITY_PATH = OPENAI_RULES_DIR / "compatibility-baseline.list"
+OPENAI_OFFICIAL_PATH = OPENAI_RULES_DIR / "official-extra.list"
+OPENAI_GENERATED_PATH = OPENAI_RULES_DIR / "generated.list"
 SOURCE_TIMEOUT_SECONDS = 12
 MIN_RULE_COUNT_RATIO = 0.5
 MAX_RULE_COUNT_RATIO = 2.0
 MIN_JOHNSHALL_RULES = 10_000
 MIN_GENERATED_RULES = 10_000
 
-# Audited active-rule counts from the repository's known-good caches at commit
-# 85ef191. They provide a first-run safety baseline when a cache is missing or
-# damaged; crossing the 50%-200% envelope requires an explicit baseline review.
+# Audited active-rule counts for known-good sources. Existing source counts were
+# established at commit 85ef191; the three OpenAI source counts were reviewed on
+# 2026-07-16. Crossing the 50%-200% envelope requires an explicit baseline review.
 SOURCE_BASELINE_RULE_COUNTS = {
-    "OpenAI": 35,
+    "OpenAI VPSDance": 45,
+    "OpenAI v2fly": 23,
+    "OpenAI Voice": 23,
     "Claude": 3,
     "WeChat": 33,
     "WeType": 1,
@@ -69,6 +78,7 @@ PROVIDER_RULE_TYPES = {
     "DOMAIN-KEYWORD",
     "USER-AGENT",
     "IP-CIDR",
+    "IP-CIDR6",
     "IP-ASN",
 }
 
@@ -81,6 +91,38 @@ GENERATED_RULE_TYPES = PROVIDER_RULE_TYPES | {
 # Johnshall historically may use MATCH as an upstream terminator; the generator
 # intentionally removes MATCH/FINAL and writes its own single FINAL.
 JOHNSHALL_RULE_TYPES = GENERATED_RULE_TYPES | {"MATCH"}
+
+OPENAI_MIN_MERGED_RULES = 80
+OPENAI_V2FLY_REGEX_RULES = {
+    r"^chatgpt-async-webps-prod-\S+-\d+\.webpubsub\.azure\.com$": (
+        "DOMAIN-KEYWORD,chatgpt-async-webps-prod-"
+    ),
+}
+OPENAI_APPROVED_VPS_SENSITIVE_RULES = {
+    "DOMAIN-KEYWORD,chatgpt-async-webps-prod",
+    "DOMAIN-KEYWORD,openai",
+    "IP-CIDR,199.47.142.0/23,no-resolve",
+    "IP-CIDR,24.199.123.28/32,no-resolve",
+    "IP-CIDR,64.23.132.171/32,no-resolve",
+    "IP-CIDR6,2604:f20::/32,no-resolve",
+    "IP-ASN,401518,no-resolve",
+}
+OPENAI_REQUIRED_RULES = {
+    "DOMAIN-SUFFIX,chat.com",
+    "DOMAIN-SUFFIX,chatgpt.com",
+    "DOMAIN-SUFFIX,chatgpt.livekit.cloud",
+    "DOMAIN-SUFFIX,host.livekit.cloud",
+    "DOMAIN-SUFFIX,oaistatic.com",
+    "DOMAIN-SUFFIX,oaistatsig.com",
+    "DOMAIN-SUFFIX,oaiusercontent.com",
+    "DOMAIN-SUFFIX,openai.com",
+    "DOMAIN-SUFFIX,sora.com",
+    "DOMAIN-SUFFIX,turn.livekit.cloud",
+    "DOMAIN,ws.chatgpt.com",
+    "IP-CIDR,199.47.142.0/23,no-resolve",
+    "IP-CIDR6,2604:f20::/32,no-resolve",
+    "IP-ASN,401518,no-resolve",
+}
 
 
 class RuleValidationError(ValueError):
@@ -131,12 +173,6 @@ copilot_domains = [
     "origin-tracker.githubusercontent.com",
 ]
 
-# OpenAI dependencies that must keep the same high-priority residential route
-# even when the upstream RULE-SET is online, stale, or replaced by local cache.
-openai_manual_domains = [
-    "oaistatsig.com",
-]
-
 # 国内外链规则字典
 domestic_lists = {
     "WeChat": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/WeChat/WeChat.list",
@@ -170,7 +206,9 @@ domestic_lists = {
     "115": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/115/115.list",
 }
 
-openai_url = "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/OpenAI/OpenAI.list"
+openai_vps_url = "https://raw.githubusercontent.com/VPSDance/ai-proxy-rules/main/rules/shadowrocket/openai.list"
+openai_v2fly_url = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/openai"
+openai_voice_url = "https://openai.com/chatgpt-voice.json"
 claude_url = "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Claude/Claude.list"
 johnshall_url = "https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf"
 
@@ -264,13 +302,17 @@ def _validate_keyword_or_user_agent(target, location, maximum_length):
         raise RuleValidationError(f"{location}: 匹配目标为空、过长或含控制字符")
 
 
-def _validate_cidr(target, location):
+def _validate_cidr(target, location, expected_version=None):
     if "/" not in target:
         raise RuleValidationError(f"{location}: CIDR 缺少前缀长度")
     try:
-        ipaddress.ip_network(target, strict=False)
+        network = ipaddress.ip_network(target, strict=False)
     except ValueError as exc:
         raise RuleValidationError(f"{location}: CIDR 格式不合法 {target!r}") from exc
+    if expected_version is not None and network.version != expected_version:
+        raise RuleValidationError(
+            f"{location}: CIDR 地址族应为 IPv{expected_version}，实际为 IPv{network.version}"
+        )
 
 
 def _validate_asn(target, location):
@@ -317,7 +359,11 @@ def validate_provider_rule(line, source_name="规则源", line_number=None):
     elif rule_type == "USER-AGENT":
         _validate_keyword_or_user_agent(target, location, 1_024)
     elif rule_type == "IP-CIDR":
+        # Preserve compatibility with Johnshall's historical IP-CIDR lines that
+        # contain IPv6 prefixes. New OpenAI IPv6 rules use explicit IP-CIDR6.
         _validate_cidr(target, location)
+    elif rule_type == "IP-CIDR6":
+        _validate_cidr(target, location, 6)
     elif rule_type == "IP-ASN":
         _validate_asn(target, location)
     return parts
@@ -354,12 +400,12 @@ def validate_routed_rule(line, source_name, line_number, allow_match=False):
         if len(parts) != 3:
             raise RuleValidationError(f"{location}: USER-AGENT 字段数量不合法")
         _validate_keyword_or_user_agent(parts[1], location, 1_024)
-    elif rule_type == "IP-CIDR":
+    elif rule_type in {"IP-CIDR", "IP-CIDR6"}:
         if len(parts) not in {3, 4}:
-            raise RuleValidationError(f"{location}: IP-CIDR 字段数量不合法")
-        _validate_cidr(parts[1], location)
+            raise RuleValidationError(f"{location}: {rule_type} 字段数量不合法")
+        _validate_cidr(parts[1], location, None if rule_type == "IP-CIDR" else 6)
         if len(parts) == 4 and parts[3].lower() != "no-resolve":
-            raise RuleValidationError(f"{location}: IP-CIDR 可选字段只能是 no-resolve")
+            raise RuleValidationError(f"{location}: {rule_type} 可选字段只能是 no-resolve")
     elif rule_type == "IP-ASN":
         if len(parts) not in {3, 4}:
             raise RuleValidationError(f"{location}: IP-ASN 字段数量不合法")
@@ -389,6 +435,246 @@ def validate_provider_content(content, source_name, baseline_count=None, content
         baseline_count if baseline_count is not None else audited_baseline,
     )
     return len(lines)
+
+
+def normalize_provider_rule(line, source_name="OpenAI 规则"):
+    """Return a canonical provider rule while preserving matching semantics."""
+    parts = validate_provider_rule(line, source_name)
+    rule_type = parts[0].upper()
+    target = parts[1]
+
+    if rule_type in {"DOMAIN", "DOMAIN-SUFFIX"}:
+        target = target.lower().rstrip(".")
+    elif rule_type == "DOMAIN-KEYWORD":
+        target = target.lower()
+    elif rule_type in {"IP-CIDR", "IP-CIDR6"}:
+        target = str(ipaddress.ip_network(target, strict=False))
+    elif rule_type == "IP-ASN":
+        target = target[2:] if target.upper().startswith("AS") else target
+
+    normalized = [rule_type, target]
+    if len(parts) == 3:
+        normalized.append(parts[2].lower())
+    return ",".join(normalized)
+
+
+def validate_vps_openai_content(content, source_name, baseline_count=None, content_type=""):
+    count = validate_provider_content(
+        content,
+        source_name,
+        baseline_count=baseline_count,
+        content_type=content_type,
+    )
+    sensitive_types = {"DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "IP-ASN"}
+    for line in provider_rule_lines(content, source_name):
+        normalized = normalize_provider_rule(line, source_name)
+        rule_type = normalized.split(",", 1)[0]
+        if normalized.startswith("IP-ASN,20473,") or normalized == "IP-ASN,20473":
+            raise RuleValidationError(f"{source_name}: 禁止重新引入共享托管 ASN 20473")
+        if (
+            rule_type in sensitive_types
+            and normalized not in OPENAI_APPROVED_VPS_SENSITIVE_RULES
+        ):
+            raise RuleValidationError(
+                f"{source_name}: 出现未经审核的高影响规则 {normalized!r}"
+            )
+    return count
+
+
+def v2fly_openai_rule_lines(content, source_name="OpenAI v2fly"):
+    lines = []
+    for line_number, raw_line in enumerate(content.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        fields = line.split()
+        entry = fields[0]
+        attributes = fields[1:]
+        if any(not attribute.startswith("@") for attribute in attributes):
+            raise RuleValidationError(
+                f"{source_name}:{line_number}: v2fly 属性格式不合法"
+            )
+
+        if entry.startswith("full:"):
+            target = entry.removeprefix("full:")
+            rule = f"DOMAIN,{target}"
+        elif entry.startswith("regexp:"):
+            expression = entry.removeprefix("regexp:")
+            rule = OPENAI_V2FLY_REGEX_RULES.get(expression)
+            if rule is None:
+                raise RuleValidationError(
+                    f"{source_name}:{line_number}: 未审核的 v2fly 正则 {expression!r}"
+                )
+        elif ":" in entry:
+            directive = entry.split(":", 1)[0]
+            raise RuleValidationError(
+                f"{source_name}:{line_number}: 不支持的 v2fly 指令 {directive!r}"
+            )
+        else:
+            rule = f"DOMAIN-SUFFIX,{entry}"
+
+        lines.append(normalize_provider_rule(rule, f"{source_name}:{line_number}"))
+
+    if not lines:
+        raise RuleValidationError(f"{source_name}: 没有有效规则")
+    return lines
+
+
+def validate_v2fly_openai_content(content, source_name, baseline_count=None, content_type=""):
+    _reject_empty_or_html(content, source_name, content_type)
+    lines = v2fly_openai_rule_lines(content, source_name)
+    canonical_source_name = source_name.removesuffix(" 本地缓存")
+    audited_baseline = SOURCE_BASELINE_RULE_COUNTS.get(canonical_source_name)
+    _check_rule_count_ratio(
+        source_name,
+        len(lines),
+        baseline_count if baseline_count is not None else audited_baseline,
+    )
+    return len(lines)
+
+
+def voice_openai_rule_lines(content, source_name="OpenAI Voice"):
+    _reject_empty_or_html(content, source_name, "application/json")
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise RuleValidationError(f"{source_name}: Voice JSON 格式不合法") from exc
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("creationTime"), str):
+        raise RuleValidationError(f"{source_name}: 缺少合法的 creationTime")
+    creation_time = payload["creationTime"]
+    if any(ord(character) < 32 for character in creation_time):
+        raise RuleValidationError(f"{source_name}: creationTime 含控制字符")
+    try:
+        parsed_creation_time = datetime.datetime.fromisoformat(
+            creation_time.replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise RuleValidationError(f"{source_name}: creationTime 不是 RFC3339 时间") from exc
+    if parsed_creation_time.tzinfo is None:
+        raise RuleValidationError(f"{source_name}: creationTime 缺少时区")
+    prefixes = payload.get("prefixes")
+    if not isinstance(prefixes, list) or not prefixes:
+        raise RuleValidationError(f"{source_name}: prefixes 为空或不是列表")
+
+    rules = []
+    for index, item in enumerate(prefixes, start=1):
+        if not isinstance(item, dict) or set(item) not in ({"ipv4Prefix"}, {"ipv6Prefix"}):
+            raise RuleValidationError(
+                f"{source_name}: prefixes[{index}] 必须且只能包含一个 IPv4/IPv6 前缀"
+            )
+        key = next(iter(item))
+        value = item[key]
+        if not isinstance(value, str):
+            raise RuleValidationError(f"{source_name}: prefixes[{index}] 不是字符串")
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as exc:
+            raise RuleValidationError(
+                f"{source_name}: prefixes[{index}] CIDR 不合法 {value!r}"
+            ) from exc
+        expected_version = 4 if key == "ipv4Prefix" else 6
+        host_prefix_length = 32 if expected_version == 4 else 128
+        if (
+            network.version != expected_version
+            or not network.is_global
+            or network.prefixlen != host_prefix_length
+        ):
+            raise RuleValidationError(
+                f"{source_name}: prefixes[{index}] 必须是公网单主机 "
+                f"IPv{expected_version} /{host_prefix_length}"
+            )
+        rule_type = "IP-CIDR" if network.version == 4 else "IP-CIDR6"
+        rules.append(f"{rule_type},{network},no-resolve")
+
+    if len(set(rules)) != len(rules):
+        raise RuleValidationError(f"{source_name}: Voice JSON 含重复网段")
+    return creation_time, rules
+
+
+def validate_voice_openai_content(content, source_name, baseline_count=None, content_type=""):
+    _reject_empty_or_html(content, source_name, content_type)
+    _, rules = voice_openai_rule_lines(content, source_name)
+    canonical_source_name = source_name.removesuffix(" 本地缓存")
+    audited_baseline = SOURCE_BASELINE_RULE_COUNTS.get(canonical_source_name)
+    _check_rule_count_ratio(
+        source_name,
+        len(rules),
+        baseline_count if baseline_count is not None else audited_baseline,
+    )
+    return len(rules)
+
+
+def local_openai_rule_lines(path, source_name):
+    content = read_text_strict(path, source_name)
+    validate_provider_content(content, source_name)
+    return [normalize_provider_rule(line, source_name) for line in provider_rule_lines(content, source_name)]
+
+
+def merge_openai_rule_lines(*rule_groups):
+    merged = set()
+    for group in rule_groups:
+        for line in group:
+            normalized = normalize_provider_rule(line)
+            parts = normalized.split(",")
+            if parts[0] == "IP-ASN" and parts[1] == "20473":
+                continue
+            if parts[0] in {"DOMAIN", "DOMAIN-SUFFIX"} and parts[1] == "humb.apple.com":
+                continue
+            merged.add(normalized)
+
+    type_order = {
+        "DOMAIN": 0,
+        "DOMAIN-SUFFIX": 1,
+        "DOMAIN-KEYWORD": 2,
+        "USER-AGENT": 3,
+        "IP-CIDR": 4,
+        "IP-CIDR6": 5,
+        "IP-ASN": 6,
+    }
+    return sorted(
+        merged,
+        key=lambda line: (
+            type_order.get(line.split(",", 1)[0], 99),
+            line.split(",")[1],
+            line,
+        ),
+    )
+
+
+def validate_merged_openai_rules(lines, baseline_rules, voice_rules):
+    rules = set(lines)
+    if len(lines) != len(rules):
+        raise RuleValidationError("OpenAI 合并规则仍含文本重复项")
+    if len(lines) < OPENAI_MIN_MERGED_RULES:
+        raise RuleValidationError(
+            f"OpenAI 合并规则只有 {len(lines)} 条，低于安全下限 {OPENAI_MIN_MERGED_RULES}"
+        )
+
+    missing_required = sorted(OPENAI_REQUIRED_RULES - rules)
+    if missing_required:
+        raise RuleValidationError(f"OpenAI 合并规则缺少哨兵项: {missing_required}")
+    missing_baseline = sorted(set(baseline_rules) - rules)
+    if missing_baseline:
+        raise RuleValidationError(f"OpenAI 合并规则缩减了固定兼容底座: {missing_baseline}")
+    missing_voice = sorted(set(voice_rules) - rules)
+    if missing_voice:
+        raise RuleValidationError(f"OpenAI 合并规则缺少官方 Voice 网段: {missing_voice}")
+    if any(line.startswith("IP-ASN,20473,") or line == "IP-ASN,20473" for line in lines):
+        raise RuleValidationError("OpenAI 合并规则禁止包含共享托管 ASN 20473")
+    return len(lines)
+
+
+def render_openai_provider(lines, voice_creation_time):
+    return (
+        "# BC OpenAI merged provider\n"
+        "# Sources: conservative baseline + VPSDance + v2fly + OpenAI official\n"
+        f"# Voice creationTime: {voice_creation_time}\n"
+        f"# Rule count: {len(lines)}\n\n"
+        + "\n".join(lines)
+        + "\n"
+    )
 
 
 def _johnshall_rule_block(content, source_name):
@@ -580,16 +866,100 @@ def validate_generated_config(content, source_name="生成配置", min_rule_coun
     return len(active_rules)
 
 
+def build_openai_provider(cache_dir, pending_cache_updates, generated_path):
+    baseline_rules = local_openai_rule_lines(
+        OPENAI_COMPATIBILITY_PATH,
+        "OpenAI 固定兼容底座",
+    )
+    official_rules = local_openai_rule_lines(
+        OPENAI_OFFICIAL_PATH,
+        "OpenAI 官方兼容层",
+    )
+
+    vps_online, vps_content = fetch_or_fallback(
+        openai_vps_url,
+        cache_dir / "OpenAI_VPSDance.list",
+        "OpenAI VPSDance",
+        validate_vps_openai_content,
+        pending_cache_updates,
+    )
+    if vps_content is None:
+        raise RuleValidationError("OpenAI VPSDance 在线内容和本地缓存都不可用")
+    vps_rules = [
+        normalize_provider_rule(line, "OpenAI VPSDance")
+        for line in provider_rule_lines(vps_content, "OpenAI VPSDance")
+    ]
+
+    v2fly_online, v2fly_content = fetch_or_fallback(
+        openai_v2fly_url,
+        cache_dir / "OpenAI_v2fly.txt",
+        "OpenAI v2fly",
+        validate_v2fly_openai_content,
+        pending_cache_updates,
+    )
+    if v2fly_content is None:
+        raise RuleValidationError("OpenAI v2fly 在线内容和本地缓存都不可用")
+    v2fly_rules = v2fly_openai_rule_lines(v2fly_content)
+
+    voice_online, voice_content = fetch_or_fallback(
+        openai_voice_url,
+        cache_dir / "OpenAI_voice.json",
+        "OpenAI Voice",
+        validate_voice_openai_content,
+        pending_cache_updates,
+    )
+    if voice_content is None:
+        raise RuleValidationError("OpenAI Voice 在线内容和本地缓存都不可用")
+    voice_creation_time, voice_rules = voice_openai_rule_lines(voice_content)
+
+    merged_rules = merge_openai_rule_lines(
+        baseline_rules,
+        official_rules,
+        vps_rules,
+        v2fly_rules,
+        voice_rules,
+    )
+    validate_merged_openai_rules(merged_rules, baseline_rules, voice_rules)
+    rendered_provider = render_openai_provider(merged_rules, voice_creation_time)
+
+    pending_cache_updates.append((cache_dir / "OpenAI.list", rendered_provider))
+    pending_cache_updates.append((Path(generated_path), rendered_provider))
+
+    digest = hashlib.sha256(rendered_provider.encode("utf-8")).hexdigest()
+    source_modes = ", ".join(
+        [
+            f"VPSDance={'online' if vps_online else 'cache'}",
+            f"v2fly={'online' if v2fly_online else 'cache'}",
+            f"Voice={'online' if voice_online else 'cache'}",
+        ]
+    )
+    print(
+        "-> OpenAI 合并完成: "
+        f"baseline={len(baseline_rules)}, official={len(official_rules)}, "
+        f"VPSDance={len(vps_rules)}, v2fly={len(v2fly_rules)}, "
+        f"Voice={len(voice_rules)}, merged={len(merged_rules)}, "
+        f"sha256={digest}, {source_modes}"
+    )
+    return merged_rules
+
+
 # ================= 规则生成逻辑 =================
 def build_config(
     output_path=DEFAULT_OUTPUT_PATH,
     cache_dir=DEFAULT_CACHE_DIR,
     backup_dir=DEFAULT_BACKUP_DIR,
     now=None,
+    openai_generated_path=None,
 ):
     output_path = Path(output_path)
     cache_dir = Path(cache_dir)
     backup_dir = Path(backup_dir)
+    if openai_generated_path is None:
+        default_output = REPOSITORY_DIR / DEFAULT_OUTPUT_PATH
+        if output_path.resolve() == default_output.resolve():
+            openai_generated_path = OPENAI_GENERATED_PATH
+        else:
+            openai_generated_path = output_path.with_name("OpenAI.generated.list")
     cache_dir.mkdir(parents=True, exist_ok=True)
     backup_dir.mkdir(parents=True, exist_ok=True)
     now = now or datetime.datetime.now()
@@ -609,29 +979,15 @@ def build_config(
     copilot_rules_str = f"# GitHub Copilot & Codex (使用节点: {openai_node})\n"
     copilot_rules_str += "".join([f"DOMAIN,{d},{openai_node}\n" for d in copilot_domains]) + "\n"
 
-    is_online, openai_content = fetch_or_fallback(
-        openai_url,
-        cache_dir / "OpenAI.list",
-        "OpenAI",
-        validate_provider_content,
-        pending_cache_updates,
-    )
-    if openai_content is None:
-        raise RuleValidationError("OpenAI 在线内容和本地缓存都不可用，保留现有配置")
-
     openai_rules_str = f"# OpenAI (使用节点: {openai_node})\n"
-    openai_rules_str += "".join([
-        f"DOMAIN-SUFFIX,{domain},{openai_node}\n"
-        for domain in openai_manual_domains
-    ])
-    if is_online:
-        openai_rules_str += f"RULE-SET,{openai_url},{openai_node}\n\n"
-        print("-> OpenAI 规则库在线，使用 RULE-SET 订阅")
-    else:
-        print("!> OpenAI 规则库失联，触发本地纯文本接管")
-        for line in provider_rule_lines(openai_content, "OpenAI 本地缓存"):
-            openai_rules_str += f"{attach_policy(line, openai_node)}\n"
-        openai_rules_str += "\n"
+    openai_rules = build_openai_provider(
+        cache_dir,
+        pending_cache_updates,
+        openai_generated_path,
+    )
+    for line in openai_rules:
+        openai_rules_str += f"{attach_policy(line, openai_node)}\n"
+    openai_rules_str += "\n"
 
     # ================= Claude 无死角分流逻辑 =================
     is_cl_online, cl_content = fetch_or_fallback(
@@ -787,6 +1143,11 @@ def parse_args(argv=None):
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_PATH), help="生成配置输出路径")
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help="规则缓存目录")
     parser.add_argument("--backup-dir", default=str(DEFAULT_BACKUP_DIR), help="生成配置备份目录")
+    parser.add_argument(
+        "--openai-generated",
+        default=None,
+        help="OpenAI 合并 provider 审计文件路径",
+    )
     return parser.parse_args(argv)
 
 
@@ -796,7 +1157,12 @@ def main(argv=None):
         if args.validate_config:
             validate_config_file(args.validate_config)
         else:
-            build_config(args.output, args.cache_dir, args.backup_dir)
+            build_config(
+                output_path=args.output,
+                cache_dir=args.cache_dir,
+                backup_dir=args.backup_dir,
+                openai_generated_path=args.openai_generated,
+            )
     except (OSError, requests.RequestException, RuleValidationError) as exc:
         print(f"严重错误: {exc}", file=sys.stderr)
         return 1

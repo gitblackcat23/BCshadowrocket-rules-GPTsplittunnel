@@ -9,6 +9,9 @@ on:
 permissions:
   issues: write
 
+env:
+  ALERT_ISSUE_TITLE: '⚠️ 规则源故障预警：当前已触发降级方案'
+
 jobs:
   monitor:
     runs-on: ubuntu-latest
@@ -16,27 +19,137 @@ jobs:
     steps:
       - name: 检查外部规则可用性
         id: check_rules
+        shell: bash
         run: |
-          # 检查 Johnshall 和 OpenAI 两个核心源
-          J_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf)
-          O_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/OpenAI/OpenAI.list)
+          set -uo pipefail
 
-          echo "Johnshall: $J_CODE, OpenAI: $O_CODE"
+          work_dir=$(mktemp -d)
+          trap 'rm -rf "$work_dir"' EXIT
 
-          if [ "$J_CODE" != "200" ] || [ "$O_CODE" != "200" ]; then
-            echo "status=failure" >> "$GITHUB_OUTPUT"
-            echo "message=外部规则源访问异常！请注意：当前 update_rules.py 正在使用本地缓存维持运行。故障码 - Johnshall: $J_CODE, OpenAI: $O_CODE" >> "$GITHUB_OUTPUT"
+          fetch() {
+            local url=$1
+            local output=$2
+            curl --silent --show-error --location \
+              --retry 2 --retry-all-errors \
+              --connect-timeout 15 --max-time 45 \
+              --output "$output" --write-out '%{http_code}' "$url" || true
+          }
+
+          johnshall_code=$(fetch \
+            'https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf' \
+            "$work_dir/johnshall.conf")
+          vpsdance_code=$(fetch \
+            'https://raw.githubusercontent.com/VPSDance/ai-proxy-rules/main/rules/shadowrocket/openai.list' \
+            "$work_dir/vpsdance.list")
+          v2fly_code=$(fetch \
+            'https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/openai' \
+            "$work_dir/v2fly-openai")
+          voice_code=$(fetch \
+            'https://openai.com/chatgpt-voice.json' \
+            "$work_dir/chatgpt-voice.json")
+
+          failures=()
+
+          if [ "$johnshall_code" != '200' ] || ! grep -Fq '[Rule]' "$work_dir/johnshall.conf"; then
+            failures+=("Johnshall：HTTP ${johnshall_code:-000} 或缺少 [Rule]")
+          fi
+          if [ "$vpsdance_code" != '200' ] || ! grep -Fq 'DOMAIN-SUFFIX,openai.com' "$work_dir/vpsdance.list"; then
+            failures+=("VPSDance OpenAI：HTTP ${vpsdance_code:-000} 或缺少 DOMAIN-SUFFIX,openai.com")
+          fi
+          if [ "$v2fly_code" != '200' ] || ! grep -Eq '(^|[.:])openai\.com([[:space:]]|$)' "$work_dir/v2fly-openai"; then
+            failures+=("v2fly OpenAI：HTTP ${v2fly_code:-000} 或缺少 openai.com")
+          fi
+          if [ "$voice_code" != '200' ] || ! jq -e '
+            .prefixes
+            | type == "array"
+              and length > 0
+              and all(.[]; ((.ipv4Prefix? // .ipv6Prefix? // "") | type == "string" and length > 0))
+          ' "$work_dir/chatgpt-voice.json" >/dev/null 2>&1; then
+            failures+=("OpenAI Voice：HTTP ${voice_code:-000} 或 prefixes 为空/无效")
+          fi
+
+          echo "Johnshall: $johnshall_code, VPSDance: $vpsdance_code, v2fly: $v2fly_code, Voice: $voice_code"
+
+          if [ "${#failures[@]}" -gt 0 ]; then
+            {
+              echo 'message<<EOF'
+              printf '%s\n' "${failures[@]}"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-      - name: 创建 GitHub Issue 提醒
+      - name: 创建或更新 GitHub Issue 提醒
         if: failure()
+        uses: actions/github-script@v8
+        env:
+          MONITOR_MESSAGE: ${{ steps.check_rules.outputs.message }}
+        with:
+          script: |
+            const title = process.env.ALERT_ISSUE_TITLE;
+            const now = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+            const details = process.env.MONITOR_MESSAGE || '监控步骤异常退出，请查看本次 Actions 日志。';
+            const body = [
+              '监控到上游源异常，生成器将使用各来源的 last-known-good 缓存维持运行。',
+              '',
+              `更新时间：${now}`,
+              '',
+              '```text',
+              details,
+              '```',
+              '',
+              `Actions：${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            ].join('\n');
+
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100
+            });
+            const existing = openIssues.find(issue => !issue.pull_request && issue.title === title);
+
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body
+              });
+            }
+
+      - name: 上游恢复后关闭现有预警
+        if: success()
         uses: actions/github-script@v8
         with:
           script: |
-            await github.rest.issues.create({
+            const title = process.env.ALERT_ISSUE_TITLE;
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: '⚠️ 规则源故障预警：当前已触发降级方案',
-              body: `监控到上游源异常，Python 脚本已自动启用本地备份运行。\n\n时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
-            })
+              state: 'open',
+              per_page: 100
+            });
+            const existing = openIssues.find(issue => !issue.pull_request && issue.title === title);
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `全部受监控规则源已恢复。恢复时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                state: 'closed'
+              });
+            }

@@ -1,0 +1,8 @@
+# Compact, approved VPSDance-shaped fixture.
+DOMAIN,openaiassets.blob.core.windows.net
+DOMAIN-SUFFIX,openai.com
+DOMAIN-SUFFIX,oaistatsig.com
+DOMAIN-KEYWORD,openai
+IP-CIDR,199.47.142.0/23,no-resolve
+IP-CIDR6,2604:f20::/32,no-resolve
+IP-ASN,401518,no-resolve

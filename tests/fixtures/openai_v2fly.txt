@@ -1,0 +1,5 @@
+# Bare domains become suffix rules; full: remains exact.
+openai.com
+full:chat.openai.com
+regexp:^chatgpt-async-webps-prod-\S+-\d+\.webpubsub\.azure\.com$
+oaistatic.com @ads

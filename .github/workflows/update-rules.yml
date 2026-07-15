@@ -53,8 +53,8 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: "Auto-update rules and sync cache [skip ci]"
-          # 指定需要提交的文件和目录
-          file_pattern: 'custom_shadowrocket_rules.conf backups/*'
+          # 同步最终配置、备份、各来源缓存和可审计的 OpenAI 生成产物
+          file_pattern: 'custom_shadowrocket_rules.conf backups/* backups/rules_cache/* rules/openai/*'
           # 如果没有文件变动，不报错也不提交
           skip_dirty_check: false
           commit_user_name: github-actions[bot]
