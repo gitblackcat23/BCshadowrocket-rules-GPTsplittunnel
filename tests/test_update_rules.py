@@ -1,5 +1,6 @@
 import datetime
 import tempfile
+import threading
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
@@ -44,10 +45,25 @@ def openai_embedded_block(config):
 
 
 class FakeResponse:
-    def __init__(self, content, status_code=200, content_type="text/plain; charset=utf-8"):
+    def __init__(
+        self,
+        content,
+        status_code=200,
+        content_type="text/plain; charset=utf-8",
+        url=None,
+    ):
         self.content = content.encode("utf-8") if isinstance(content, str) else content
         self.status_code = status_code
         self.headers = {"content-type": content_type}
+        self.url = url
+        self.closed = False
+
+    def iter_content(self, chunk_size):
+        for start in range(0, len(self.content), chunk_size):
+            yield self.content[start : start + chunk_size]
+
+    def close(self):
+        self.closed = True
 
 
 class RuleGeneratorTests(unittest.TestCase):
@@ -62,8 +78,21 @@ class RuleGeneratorTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-    def online_response(self, url, timeout, johnshall_content=None):
-        self.assertEqual(timeout, rules.SOURCE_TIMEOUT_SECONDS)
+    def online_response(
+        self,
+        url,
+        timeout,
+        johnshall_content=None,
+        *,
+        stream=False,
+        allow_redirects=False,
+    ):
+        self.assertEqual(
+            timeout,
+            (rules.SOURCE_CONNECT_TIMEOUT_SECONDS, rules.SOURCE_TIMEOUT_SECONDS),
+        )
+        self.assertTrue(stream)
+        self.assertTrue(allow_redirects)
         if url == rules.openai_vps_url:
             return FakeResponse(self.openai_vps_content)
         if url == rules.openai_v2fly_url:
@@ -81,6 +110,7 @@ class RuleGeneratorTests(unittest.TestCase):
         stack.enter_context(mock.patch.object(rules, "MIN_GENERATED_RULES", 1))
         stack.enter_context(mock.patch.object(rules, "OPENAI_MIN_MERGED_RULES", 1))
         stack.enter_context(mock.patch.object(rules, "SOURCE_BASELINE_RULE_COUNTS", {}))
+        stack.enter_context(mock.patch.object(rules, "SOURCE_DOWNLOAD_ATTEMPTS", 1))
         return stack
 
     def write_complete_offline_cache(self, cache_dir):
@@ -249,7 +279,7 @@ class RuleGeneratorTests(unittest.TestCase):
 
                 with mock.patch.object(rules.requests, "get", return_value=response):
                     is_online, content = rules.fetch_or_fallback(
-                        "https://rules.invalid/provider.list",
+                        rules.claude_url,
                         cache_path,
                         "Fixture provider",
                         rules.validate_provider_content,
@@ -258,6 +288,108 @@ class RuleGeneratorTests(unittest.TestCase):
                 self.assertFalse(is_online)
                 self.assertEqual(content, self.provider_content)
                 self.assertEqual(cache_path.read_bytes(), original_bytes)
+
+    def test_download_retries_transient_failure_and_enforces_redirect_and_size(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            cache_path = root / "provider.list"
+            successful_response = FakeResponse(self.provider_content)
+
+            with (
+                mock.patch.object(
+                    rules.requests,
+                    "get",
+                    side_effect=[
+                        requests.ConnectionError("transient fixture failure"),
+                        successful_response,
+                    ],
+                ) as get_mock,
+                mock.patch.object(rules, "SOURCE_DOWNLOAD_ATTEMPTS", 2),
+                mock.patch.object(rules.time, "sleep"),
+            ):
+                is_online, content = rules.fetch_or_fallback(
+                    rules.claude_url,
+                    cache_path,
+                    "Claude",
+                    rules.validate_provider_content,
+                )
+
+            self.assertTrue(is_online)
+            self.assertEqual(content, self.provider_content)
+            self.assertEqual(get_mock.call_count, 2)
+            self.assertTrue(successful_response.closed)
+
+            redirected = FakeResponse(
+                self.provider_content,
+                url="https://untrusted.example/provider.list",
+            )
+            with (
+                mock.patch.object(rules.requests, "get", return_value=redirected),
+                mock.patch.object(rules, "SOURCE_DOWNLOAD_ATTEMPTS", 1),
+            ):
+                is_online, content = rules.fetch_or_fallback(
+                    rules.claude_url,
+                    root / "redirected.list",
+                    "Redirect fixture",
+                    rules.validate_provider_content,
+                )
+            self.assertFalse(is_online)
+            self.assertIsNone(content)
+            self.assertTrue(redirected.closed)
+
+            oversized = FakeResponse(self.provider_content)
+            with (
+                mock.patch.object(rules.requests, "get", return_value=oversized),
+                mock.patch.object(rules, "SOURCE_DOWNLOAD_ATTEMPTS", 1),
+                mock.patch.object(rules, "MAX_SOURCE_BYTES", 8),
+            ):
+                is_online, content = rules.fetch_or_fallback(
+                    rules.claude_url,
+                    root / "oversized.list",
+                    "Oversized fixture",
+                    rules.validate_provider_content,
+                )
+            self.assertFalse(is_online)
+            self.assertIsNone(content)
+            self.assertTrue(oversized.closed)
+
+    def test_independent_sources_download_concurrently_with_stable_result_order(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            rendezvous = threading.Barrier(2)
+
+            def concurrent_response(url, **kwargs):
+                rendezvous.wait(timeout=2)
+                return FakeResponse(self.provider_content)
+
+            specifications = [
+                (
+                    "first",
+                    rules.claude_url,
+                    root / "first.list",
+                    "Fixture first",
+                    rules.validate_provider_content,
+                ),
+                (
+                    "second",
+                    rules.claude_url,
+                    root / "second.list",
+                    "Fixture second",
+                    rules.validate_provider_content,
+                ),
+            ]
+            with (
+                mock.patch.object(rules.requests, "get", side_effect=concurrent_response),
+                mock.patch.object(rules, "SOURCE_DOWNLOAD_ATTEMPTS", 1),
+            ):
+                results, pending = rules.fetch_sources_parallel(specifications)
+
+            self.assertEqual(list(results), ["first", "second"])
+            self.assertTrue(all(is_online for is_online, _ in results.values()))
+            self.assertEqual(
+                [path.name for path, _ in pending],
+                ["first.list", "second.list"],
+            )
 
     def test_each_dynamic_openai_source_uses_its_own_last_known_good_cache(self):
         sources = [
@@ -349,6 +481,7 @@ class RuleGeneratorTests(unittest.TestCase):
 
             openai_block = openai_embedded_block(generated)
             self.assertNotIn("RULE-SET,", openai_block)
+            self.assertNotIn("RULE-SET,", generated)
             for source_url in (
                 rules.openai_vps_url,
                 rules.openai_v2fly_url,
@@ -394,20 +527,64 @@ class RuleGeneratorTests(unittest.TestCase):
                 rules.openai_node,
             )
             self.assertIn(
-                f"RULE-SET,{rules.claude_url},{rules.claude_node}", generated
+                f"DOMAIN-SUFFIX,fixture.example,{rules.claude_node}", generated
             )
+            self.assertIn("# Claude 上游补充规则 (在线校验快照内联)", generated)
             self.assertIn(
                 f"DOMAIN,{rules.copilot_domains[0]},{rules.openai_node}", generated
             )
-            for name, url in rules.domestic_lists.items():
+            for name in rules.domestic_lists:
                 with self.subTest(domestic=name):
-                    self.assertIn(f"RULE-SET,{url},DIRECT", generated)
+                    self.assertIn(f"# {name} (在线校验快照内联)", generated)
             self.assertIn("DOMAIN-SUFFIX,foreign.fixture.example,Proxy", generated)
             self.assertTrue(generated.rstrip().endswith("hostname = fixture.example"))
             self.assertIn(f"FINAL,{rules.default_node}", generated)
             self.assertEqual(generated.upper().count("\nFINAL,"), 1)
             self.assertNotIn(",no-resolve,DIRECT", generated)
             self.assertNotIn(f",no-resolve,{rules.openai_node}", generated)
+
+    def test_semantically_identical_rebuild_skips_timestamp_backup(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            arguments = {
+                "output_path": root / "custom.conf",
+                "cache_dir": root / "cache",
+                "backup_dir": root / "backups",
+                "openai_generated_path": root / "audit" / "OpenAI.generated.list",
+            }
+
+            with self.relaxed_build_context(self.online_response):
+                rules.build_config(
+                    **arguments,
+                    now=datetime.datetime(2026, 7, 15, 12, 34, 56),
+                )
+            with self.relaxed_build_context(self.online_response):
+                rebuilt = rules.build_config(
+                    **arguments,
+                    now=datetime.datetime(2026, 7, 16, 12, 34, 56),
+                )
+
+            backups = list((root / "backups").glob("custom_rules_*.conf"))
+            self.assertEqual(
+                [path.name for path in backups],
+                ["custom_rules_20260715_123456.conf"],
+            )
+            self.assertIn("Apple & iCloud Services (DIRECT) - 2026-07-16", rebuilt)
+
+    def test_backup_can_be_disabled_for_ci(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            with self.relaxed_build_context(self.online_response):
+                rules.build_config(
+                    output_path=root / "custom.conf",
+                    cache_dir=root / "cache",
+                    backup_dir=None,
+                    now=datetime.datetime(2026, 7, 15, 12, 34, 56),
+                    openai_generated_path=root / "audit" / "OpenAI.generated.list",
+                )
+
+            self.assertTrue((root / "custom.conf").exists())
+            self.assertFalse((root / "backups").exists())
 
     def test_fully_offline_complete_cache_inlines_all_openai_and_existing_sources(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -469,7 +646,7 @@ class RuleGeneratorTests(unittest.TestCase):
             self.assertEqual(len(rules.domestic_lists), 29)
             for name in rules.domestic_lists:
                 with self.subTest(domestic=name):
-                    self.assertIn(f"# {name} (降级使用本地缓存内联)", generated)
+                    self.assertIn(f"# {name} (本地缓存快照内联)", generated)
             self.assertNotIn(",no-resolve,DIRECT", generated)
             self.assertNotIn(f",no-resolve,{rules.openai_node}", generated)
             self.assertEqual(generated.upper().count("\nFINAL,"), 1)
@@ -545,7 +722,7 @@ class RuleGeneratorTests(unittest.TestCase):
                 mock.patch.object(rules, "MIN_JOHNSHALL_RULES", 1),
             ):
                 is_online, content = rules.fetch_or_fallback(
-                    "https://rules.invalid/johnshall.conf",
+                    rules.johnshall_url,
                     cache_path,
                     "Johnshall fixture",
                     rules.validate_johnshall_content,
@@ -564,8 +741,13 @@ class RuleGeneratorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
 
-            def online_response(url, timeout):
-                return self.online_response(url, timeout, modified_johnshall)
+            def online_response(url, timeout, **kwargs):
+                return self.online_response(
+                    url,
+                    timeout,
+                    modified_johnshall,
+                    **kwargs,
+                )
 
             with self.relaxed_build_context(online_response):
                 generated = rules.build_config(
@@ -612,8 +794,13 @@ class RuleGeneratorTests(unittest.TestCase):
                 path.write_text(content, encoding="utf-8")
             original_bytes = {path: path.read_bytes() for path in existing_files}
 
-            def online_response(url, timeout):
-                return self.online_response(url, timeout, modified_johnshall)
+            def online_response(url, timeout, **kwargs):
+                return self.online_response(
+                    url,
+                    timeout,
+                    modified_johnshall,
+                    **kwargs,
+                )
 
             with self.relaxed_build_context(online_response), mock.patch.object(
                 rules,
@@ -649,6 +836,53 @@ class RuleGeneratorTests(unittest.TestCase):
             with self.subTest(label=label):
                 with self.assertRaises(rules.RuleValidationError):
                     rules.validate_provider_content(content, f"Invalid {label}")
+
+    def test_final_config_rejects_every_runtime_ruleset(self):
+        config = self.johnshall_content.replace(
+            "[Rule]\n",
+            "[Rule]\nRULE-SET,https://raw.githubusercontent.com/example/rules/main/list,DIRECT\n",
+            1,
+        )
+        with self.assertRaisesRegex(rules.RuleValidationError, "禁止运行时 RULE-SET"):
+            rules.validate_generated_config(config, min_rule_count=1)
+
+    def test_multi_file_publish_failure_rolls_back_every_target(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            created_target = root / "new-cache.list"
+            first_target = root / "existing-cache.list"
+            second_target = root / "custom.conf"
+            first_target.write_text("old cache\n", encoding="utf-8")
+            second_target.write_text("old config\n", encoding="utf-8")
+
+            real_replace = rules.os.replace
+            publish_count = 0
+
+            def fail_third_publish(source, target):
+                nonlocal publish_count
+                if str(source).endswith(".publish.tmp"):
+                    publish_count += 1
+                    if publish_count == 3:
+                        raise OSError("forced third publish failure")
+                return real_replace(source, target)
+
+            with mock.patch.object(rules.os, "replace", side_effect=fail_third_publish):
+                with self.assertRaisesRegex(OSError, "forced third publish failure"):
+                    rules.transactional_write_text(
+                        [
+                            (created_target, "new cache\n"),
+                            (first_target, "updated cache\n"),
+                            (second_target, "updated config\n"),
+                        ]
+                    )
+
+            self.assertFalse(created_target.exists())
+            self.assertEqual(first_target.read_text(encoding="utf-8"), "old cache\n")
+            self.assertEqual(second_target.read_text(encoding="utf-8"), "old config\n")
+            self.assertEqual(
+                [path.name for path in root.iterdir() if path.name.startswith(".")],
+                [],
+            )
 
     def test_atomic_replace_failure_preserves_existing_file(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

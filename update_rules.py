@@ -1,4 +1,5 @@
 import argparse
+import concurrent.futures
 import datetime
 import hashlib
 import ipaddress
@@ -6,6 +7,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -27,6 +29,16 @@ OPENAI_COMPATIBILITY_PATH = OPENAI_RULES_DIR / "compatibility-baseline.list"
 OPENAI_OFFICIAL_PATH = OPENAI_RULES_DIR / "official-extra.list"
 OPENAI_GENERATED_PATH = OPENAI_RULES_DIR / "generated.list"
 SOURCE_TIMEOUT_SECONDS = 12
+SOURCE_CONNECT_TIMEOUT_SECONDS = 5
+SOURCE_DOWNLOAD_ATTEMPTS = 3
+SOURCE_RETRY_BACKOFF_SECONDS = 0.25
+SOURCE_DOWNLOAD_CHUNK_SIZE = 64 * 1024
+MAX_SOURCE_BYTES = 16 * 1024 * 1024
+MAX_DOWNLOAD_WORKERS = 8
+ALLOWED_SOURCE_HOSTS = {
+    "johnshall.github.io",
+    "raw.githubusercontent.com",
+}
 MIN_RULE_COUNT_RATIO = 0.5
 MAX_RULE_COUNT_RATIO = 2.0
 MIN_JOHNSHALL_RULES = 10_000
@@ -657,21 +669,17 @@ def attach_policy(line, policy):
     return ",".join(parts[:2] + [policy] + parts[2:])
 
 
-def atomic_write_text(path, content):
-    """Atomically replace a UTF-8 text file without changing an existing file mode."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o644
+def _stage_bytes(path, data, suffix, mode):
+    """Write and fsync bytes to a sibling temporary file."""
     fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+        prefix=f".{path.name}.", suffix=suffix, dir=str(path.parent)
     )
     try:
         os.fchmod(fd, mode)
         with os.fdopen(fd, "wb") as temporary_file:
-            temporary_file.write(content.encode("utf-8"))
+            temporary_file.write(data)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
-        os.replace(temporary_name, path)
     except Exception:
         try:
             os.close(fd)
@@ -682,9 +690,217 @@ def atomic_write_text(path, content):
         except FileNotFoundError:
             pass
         raise
+    return Path(temporary_name)
+
+
+def _fsync_directories(directories):
+    for directory in sorted({Path(path) for path in directories}, key=str):
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _remove_if_present(path):
+    if path is None:
+        return
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def transactional_write_text(updates):
+    """Publish a set of UTF-8 files together, rolling every target back on error.
+
+    Each replacement is atomic at the filesystem level. The surrounding rollback
+    journal makes a multi-file generation behave as a transaction for ordinary
+    write/rename failures: either every changed target is published, or the prior
+    bytes are restored.
+    """
+    requested = {}
+    order = []
+    for raw_path, content in updates:
+        target = Path(raw_path).resolve()
+        if not isinstance(content, str):
+            raise TypeError(f"{target}: 待写内容必须是字符串")
+        encoded = content.encode("utf-8")
+        if target in requested:
+            if requested[target] != encoded:
+                raise RuleValidationError(f"发布清单对 {target} 包含相互冲突的内容")
+            continue
+        requested[target] = encoded
+        order.append(target)
+
+    entries = []
+    replaced = []
+    directories = set()
+    try:
+        for target in order:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            directories.add(target.parent)
+            existed = target.exists()
+            previous = target.read_bytes() if existed else None
+            if previous == requested[target]:
+                continue
+
+            mode = (target.stat().st_mode & 0o777) if existed else 0o644
+            staged = _stage_bytes(target, requested[target], ".publish.tmp", mode)
+            try:
+                rollback = (
+                    _stage_bytes(target, previous, ".rollback.tmp", mode)
+                    if previous is not None
+                    else None
+                )
+            except Exception:
+                _remove_if_present(staged)
+                raise
+            entries.append(
+                {
+                    "target": target,
+                    "staged": staged,
+                    "rollback": rollback,
+                    "existed": existed,
+                    "keep_rollback": False,
+                }
+            )
+
+        for entry in entries:
+            os.replace(entry["staged"], entry["target"])
+            entry["staged"] = None
+            replaced.append(entry)
+        _fsync_directories(directories)
+    except Exception as publish_error:
+        rollback_errors = []
+        for entry in reversed(replaced):
+            try:
+                if entry["existed"]:
+                    os.replace(entry["rollback"], entry["target"])
+                    entry["rollback"] = None
+                else:
+                    _remove_if_present(entry["target"])
+            except Exception as rollback_error:
+                entry["keep_rollback"] = True
+                rollback_errors.append(
+                    f"{entry['target']} (保留恢复副本 {entry['rollback']}): {rollback_error}"
+                )
+
+        for entry in entries:
+            _remove_if_present(entry["staged"])
+            if not entry["keep_rollback"]:
+                _remove_if_present(entry["rollback"])
+        try:
+            _fsync_directories(directories)
+        except OSError as rollback_sync_error:
+            rollback_errors.append(f"目录同步: {rollback_sync_error}")
+
+        if rollback_errors:
+            details = "; ".join(rollback_errors)
+            raise OSError(f"批量发布失败且回滚不完整: {details}") from publish_error
+        raise
+
+    for entry in entries:
+        _remove_if_present(entry["staged"])
+        _remove_if_present(entry["rollback"])
+    if entries:
+        _fsync_directories(directories)
+    return [entry["target"] for entry in entries]
+
+
+def atomic_write_text(path, content):
+    """Atomically replace one UTF-8 text file while preserving its mode."""
+    transactional_write_text([(path, content)])
+
+
+def semantic_config_fingerprint(content):
+    """Ignore comments/blank lines when deciding whether a backup is meaningful."""
+    active_lines = [
+        line.strip()
+        for line in content.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return hashlib.sha256("\n".join(active_lines).encode("utf-8")).hexdigest()
 
 
 # ================= 核心网络与降级函数 =================
+def _validate_download_url(url, source_name):
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or hostname not in ALLOWED_SOURCE_HOSTS:
+        raise RuleValidationError(
+            f"{source_name}: 仅允许从受信任 HTTPS 主机下载，实际为 {url!r}"
+        )
+
+
+def _read_bounded_response(response, source_name):
+    declared_length = response.headers.get("content-length")
+    if declared_length:
+        try:
+            declared_size = int(declared_length)
+        except ValueError as exc:
+            raise RuleValidationError(f"{source_name}: Content-Length 不合法") from exc
+        if declared_size < 0 or declared_size > MAX_SOURCE_BYTES:
+            raise RuleValidationError(
+                f"{source_name}: 响应体声明大小 {declared_size} 超过上限 {MAX_SOURCE_BYTES}"
+            )
+
+    chunks = []
+    total_size = 0
+    if hasattr(response, "iter_content"):
+        iterator = response.iter_content(chunk_size=SOURCE_DOWNLOAD_CHUNK_SIZE)
+    else:
+        iterator = (response.content,)
+    for chunk in iterator:
+        if not chunk:
+            continue
+        total_size += len(chunk)
+        if total_size > MAX_SOURCE_BYTES:
+            raise RuleValidationError(
+                f"{source_name}: 响应体超过上限 {MAX_SOURCE_BYTES} 字节"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _download_source(url, source_name):
+    _validate_download_url(url, source_name)
+    attempts = max(1, SOURCE_DOWNLOAD_ATTEMPTS)
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        response = None
+        try:
+            response = requests.get(
+                url,
+                timeout=(SOURCE_CONNECT_TIMEOUT_SECONDS, SOURCE_TIMEOUT_SECONDS),
+                stream=True,
+                allow_redirects=True,
+            )
+            final_url = getattr(response, "url", None) or url
+            _validate_download_url(final_url, f"{source_name} 重定向结果")
+
+            if response.status_code == 200:
+                return (
+                    _read_bounded_response(response, source_name),
+                    response.headers.get("content-type", ""),
+                )
+            if response.status_code == 429 or 500 <= response.status_code <= 599:
+                raise requests.HTTPError(f"HTTP {response.status_code}")
+            raise RuleValidationError(f"HTTP {response.status_code}")
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt == attempts:
+                raise
+        finally:
+            if response is not None and callable(getattr(response, "close", None)):
+                response.close()
+
+        time.sleep(SOURCE_RETRY_BACKOFF_SECONDS * attempt)
+
+    raise last_error  # pragma: no cover - 循环保证不会到达此处
+
+
 def fetch_or_fallback(
     url,
     cache_path,
@@ -706,11 +922,8 @@ def fetch_or_fallback(
             cached_count = None
 
     try:
-        response = requests.get(url, timeout=SOURCE_TIMEOUT_SECONDS)
-        if response.status_code != 200:
-            raise RuleValidationError(f"HTTP {response.status_code}")
-        online_content = _decode_utf8(response.content, source_name)
-        content_type = response.headers.get("content-type", "")
+        response_bytes, content_type = _download_source(url, source_name)
+        online_content = _decode_utf8(response_bytes, source_name)
         validator(online_content, source_name, cached_count, content_type)
         if pending_cache_updates is None:
             atomic_write_text(cache_path, online_content)
@@ -724,6 +937,44 @@ def fetch_or_fallback(
         print(f"-> {source_name} 使用最后一份有效本地缓存")
         return False, cached_content
     return False, None
+
+
+def fetch_sources_parallel(specifications):
+    """Fetch independent sources concurrently and preserve specification order."""
+    specifications = list(specifications)
+    if not specifications:
+        return {}, []
+
+    keys = [specification[0] for specification in specifications]
+    if len(keys) != len(set(keys)):
+        raise RuleValidationError("并行下载清单包含重复键")
+
+    def fetch_one(specification):
+        key, url, cache_path, source_name, validator = specification
+        local_updates = []
+        result = fetch_or_fallback(
+            url,
+            cache_path,
+            source_name,
+            validator,
+            local_updates,
+        )
+        return key, result, local_updates
+
+    future_by_key = {}
+    worker_count = min(MAX_DOWNLOAD_WORKERS, len(specifications))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        for specification in specifications:
+            future = executor.submit(fetch_one, specification)
+            future_by_key[specification[0]] = future
+
+        results = {}
+        pending_updates = []
+        for key in keys:
+            returned_key, result, local_updates = future_by_key[key].result()
+            results[returned_key] = result
+            pending_updates.extend(local_updates)
+    return results, pending_updates
 
 
 def validate_generated_config(content, source_name="生成配置", min_rule_count=None):
@@ -753,6 +1004,10 @@ def validate_generated_config(content, source_name="生成配置", min_rule_coun
             continue
         parts = validate_routed_rule(line, f"{source_name} [Rule]", line_number)
         rule_type = parts[0].upper()
+        if rule_type == "RULE-SET":
+            raise RuleValidationError(
+                f"{source_name} [Rule]:{line_number}: 最终配置禁止运行时 RULE-SET"
+            )
         if rule_type == "FINAL":
             final_indexes.append(len(active_rules))
         active_rules.append(line)
@@ -797,13 +1052,27 @@ def build_openai_provider(cache_dir, pending_cache_updates, generated_path):
         "OpenAI 官方兼容层",
     )
 
-    vps_online, vps_content = fetch_or_fallback(
-        openai_vps_url,
-        cache_dir / "OpenAI_VPSDance.list",
-        "OpenAI VPSDance",
-        validate_vps_openai_content,
-        pending_cache_updates,
+    source_results, source_updates = fetch_sources_parallel(
+        [
+            (
+                "vps",
+                openai_vps_url,
+                cache_dir / "OpenAI_VPSDance.list",
+                "OpenAI VPSDance",
+                validate_vps_openai_content,
+            ),
+            (
+                "v2fly",
+                openai_v2fly_url,
+                cache_dir / "OpenAI_v2fly.txt",
+                "OpenAI v2fly",
+                validate_v2fly_openai_content,
+            ),
+        ]
     )
+    pending_cache_updates.extend(source_updates)
+
+    vps_online, vps_content = source_results["vps"]
     if vps_content is None:
         raise RuleValidationError("OpenAI VPSDance 在线内容和本地缓存都不可用")
     vps_rules = [
@@ -811,13 +1080,7 @@ def build_openai_provider(cache_dir, pending_cache_updates, generated_path):
         for line in provider_rule_lines(vps_content, "OpenAI VPSDance")
     ]
 
-    v2fly_online, v2fly_content = fetch_or_fallback(
-        openai_v2fly_url,
-        cache_dir / "OpenAI_v2fly.txt",
-        "OpenAI v2fly",
-        validate_v2fly_openai_content,
-        pending_cache_updates,
-    )
+    v2fly_online, v2fly_content = source_results["v2fly"]
     if v2fly_content is None:
         raise RuleValidationError("OpenAI v2fly 在线内容和本地缓存都不可用")
     v2fly_rules = v2fly_openai_rule_lines(v2fly_content)
@@ -861,7 +1124,7 @@ def build_config(
 ):
     output_path = Path(output_path)
     cache_dir = Path(cache_dir)
-    backup_dir = Path(backup_dir)
+    backup_dir = Path(backup_dir) if backup_dir is not None else None
     if openai_generated_path is None:
         default_output = REPOSITORY_DIR / DEFAULT_OUTPUT_PATH
         if output_path.resolve() == default_output.resolve():
@@ -869,7 +1132,6 @@ def build_config(
         else:
             openai_generated_path = output_path.with_name("OpenAI.generated.list")
     cache_dir.mkdir(parents=True, exist_ok=True)
-    backup_dir.mkdir(parents=True, exist_ok=True)
     now = now or datetime.datetime.now()
     pending_cache_updates = []
 
@@ -897,14 +1159,28 @@ def build_config(
         openai_rules_str += f"{attach_policy(line, openai_node)}\n"
     openai_rules_str += "\n"
 
-    # ================= Claude 无死角分流逻辑 =================
-    is_cl_online, cl_content = fetch_or_fallback(
-        claude_url,
-        cache_dir / "Claude.list",
-        "Claude",
-        validate_provider_content,
-        pending_cache_updates,
+    core_results, core_updates = fetch_sources_parallel(
+        [
+            (
+                "claude",
+                claude_url,
+                cache_dir / "Claude.list",
+                "Claude",
+                validate_provider_content,
+            ),
+            (
+                "johnshall",
+                johnshall_url,
+                cache_dir / "johnshall_latest.conf",
+                "Johnshall",
+                validate_johnshall_content,
+            ),
+        ]
     )
+    pending_cache_updates.extend(core_updates)
+
+    # ================= Claude 无死角分流逻辑 =================
+    is_cl_online, cl_content = core_results["claude"]
     if cl_content is None:
         raise RuleValidationError("Claude 在线内容和本地缓存都不可用，保留现有配置")
 
@@ -940,25 +1216,18 @@ def build_config(
     claude_rules_str += f"DOMAIN-KEYWORD,claude,{claude_node}\n"
     claude_rules_str += f"DOMAIN-KEYWORD,anthropic,{claude_node}\n"
 
-    # F. 订阅 Rule-Set (补充库中可能存在的其他域名)
-    if is_cl_online:
-        claude_rules_str += f"RULE-SET,{claude_url},{claude_node}\n"
-        print("-> Claude 规则库在线，使用 RULE-SET 订阅")
-    else:
-        print("!> Claude 规则库失联，使用本地缓存内联接管")
-        for line in provider_rule_lines(cl_content, "Claude 本地缓存"):
-            claude_rules_str += f"{attach_policy(line, claude_node)}\n"
+    # F. 内联已经过构建时校验的上游快照，避免客户端运行时重新下载绕过校验。
+    claude_source_name = "Claude" if is_cl_online else "Claude 本地缓存"
+    claude_mode = "在线校验快照" if is_cl_online else "本地缓存快照"
+    claude_rules_str += f"# Claude 上游补充规则 ({claude_mode}内联)\n"
+    for line in provider_rule_lines(cl_content, claude_source_name):
+        claude_rules_str += f"{attach_policy(line, claude_node)}\n"
+    print(f"-> Claude 使用{claude_mode}内联，运行时不再下载 RULE-SET")
     claude_rules_str += "\n"
     # =================================================================
 
     # 3. 处理 Johnshall 基础与去广告规则
-    _, j_content = fetch_or_fallback(
-        johnshall_url,
-        cache_dir / "johnshall_latest.conf",
-        "Johnshall",
-        validate_johnshall_content,
-        pending_cache_updates,
-    )
+    _, j_content = core_results["johnshall"]
     if j_content is None:
         raise RuleValidationError("Johnshall 在线内容和本地缓存都不可用，保留现有配置")
 
@@ -989,24 +1258,31 @@ def build_config(
         and line.strip() not in upstream_apple_conflicts
     ])
 
-    # 4. 构建国内直连 RULE-SET
+    # 4. 并行获取并内联国内直连规则，客户端只执行构建时校验过的内容。
     domestic_rules_str = "\n# --- 国内常用 APP 及服务 (DIRECT) ---\n"
-    for name, url in domestic_lists.items():
-        is_dom_online, dom_content = fetch_or_fallback(
-            url,
-            cache_dir / f"{name}.list",
-            name,
-            validate_provider_content,
-            pending_cache_updates,
-        )
+    domestic_results, domestic_updates = fetch_sources_parallel(
+        [
+            (
+                name,
+                url,
+                cache_dir / f"{name}.list",
+                name,
+                validate_provider_content,
+            )
+            for name, url in domestic_lists.items()
+        ]
+    )
+    pending_cache_updates.extend(domestic_updates)
+
+    for name in domestic_lists:
+        is_dom_online, dom_content = domestic_results[name]
         if dom_content is None:
             raise RuleValidationError(f"{name} 在线内容和本地缓存都不可用，保留现有配置")
-        if is_dom_online:
-            domestic_rules_str += f"RULE-SET,{url},DIRECT\n"
-        else:
-            domestic_rules_str += f"# {name} (降级使用本地缓存内联)\n"
-            for line in provider_rule_lines(dom_content, f"{name} 本地缓存"):
-                domestic_rules_str += f"{attach_policy(line, 'DIRECT')}\n"
+        source_name = name if is_dom_online else f"{name} 本地缓存"
+        mode = "在线校验快照" if is_dom_online else "本地缓存快照"
+        domestic_rules_str += f"# {name} ({mode}内联)\n"
+        for line in provider_rule_lines(dom_content, source_name):
+            domestic_rules_str += f"{attach_policy(line, 'DIRECT')}\n"
 
     # 5. 核心严格拼装顺序 (Claude 规则紧跟 OpenAI)
     final_rules = (
@@ -1024,15 +1300,24 @@ def build_config(
     new_content = before_rules + final_rules + after_rules
     validate_generated_config(new_content)
 
-    # No online response reaches a cache until the complete generated config has
-    # passed validation, closing gaps between source parsing and transformation.
-    for cache_path, cache_content in pending_cache_updates:
-        atomic_write_text(cache_path, cache_content)
+    # 缓存、审计产物、可选备份和正式配置一次性发布；任一替换失败即回滚全部。
+    publication = list(pending_cache_updates)
+    previous_content = None
+    if output_path.exists():
+        previous_content = read_text_strict(output_path, str(output_path))
+    semantic_change = (
+        previous_content is None
+        or semantic_config_fingerprint(previous_content)
+        != semantic_config_fingerprint(new_content)
+    )
 
-    # 先成功写入新的独立备份，再原子替换正式配置；正式配置永远不会半写入。
-    backup_path = backup_dir / f"custom_rules_{now.strftime('%Y%m%d_%H%M%S')}.conf"
-    atomic_write_text(backup_path, new_content)
-    atomic_write_text(output_path, new_content)
+    if backup_dir is not None and semantic_change:
+        backup_path = backup_dir / f"custom_rules_{now.strftime('%Y%m%d_%H%M%S')}.conf"
+        publication.append((backup_path, new_content))
+    elif backup_dir is not None:
+        print("-> 主规则语义未变化，跳过时间戳备份")
+    publication.append((output_path, new_content))
+    transactional_write_text(publication)
 
     print(f"[{datetime.datetime.now()}] 规则已成功重构并生成！")
     return new_content
@@ -1052,6 +1337,11 @@ def parse_args(argv=None):
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help="规则缓存目录")
     parser.add_argument("--backup-dir", default=str(DEFAULT_BACKUP_DIR), help="生成配置备份目录")
     parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="不生成时间戳备份（CI 可依赖 Git 历史）",
+    )
+    parser.add_argument(
         "--openai-generated",
         default=None,
         help="OpenAI 合并 provider 审计文件路径",
@@ -1068,7 +1358,7 @@ def main(argv=None):
             build_config(
                 output_path=args.output,
                 cache_dir=args.cache_dir,
-                backup_dir=args.backup_dir,
+                backup_dir=None if args.no_backup else args.backup_dir,
                 openai_generated_path=args.openai_generated,
             )
     except (OSError, requests.RequestException, RuleValidationError) as exc:
