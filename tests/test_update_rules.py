@@ -1,4 +1,5 @@
 import datetime
+import re
 import tempfile
 import threading
 import unittest
@@ -469,6 +470,7 @@ class RuleGeneratorTests(unittest.TestCase):
             ordered_markers = [
                 "# Apple & iCloud Services (DIRECT)",
                 "# Tonghuashun (DIRECT)",
+                "# Dongqiudi Ads (REJECT)",
                 "# OpenAI (使用节点:",
                 "# Claude 全家桶 (使用节点:",
                 "# GitHub Copilot & Codex (使用节点:",
@@ -519,6 +521,10 @@ class RuleGeneratorTests(unittest.TestCase):
                 "DIRECT",
             )
             self.assertEqual(
+                first_embedded_domain_policy(generated, "apimg.qunliao.info"),
+                "REJECT",
+            )
+            self.assertEqual(
                 first_embedded_domain_policy(generated, "claude.ai"),
                 rules.claude_node,
             )
@@ -537,11 +543,97 @@ class RuleGeneratorTests(unittest.TestCase):
                 with self.subTest(domestic=name):
                     self.assertIn(f"# {name} (在线校验快照内联)", generated)
             self.assertIn("DOMAIN-SUFFIX,foreign.fixture.example,Proxy", generated)
-            self.assertTrue(generated.rstrip().endswith("hostname = fixture.example"))
+            self.assertEqual(generated.count(rules.DONGQIUDI_AD_RULE), 1)
+            self.assertEqual(generated.count(rules.DONGQIUDI_REWRITE_RULE), 1)
+            self.assertEqual(
+                generated.count(rules.DONGQIUDI_LEGACY_REWRITE_RULE),
+                1,
+            )
+            rewrite_pattern, rewrite_action = rules.DONGQIUDI_REWRITE_RULE.rsplit(" ", 1)
+            self.assertEqual(rewrite_action, "reject")
+            self.assertIsNotNone(
+                re.match(rewrite_pattern, "https://ap.dongdianqiu.com/plat/v4")
+            )
+            self.assertIsNone(
+                re.match(rewrite_pattern, "https://ap.dongqiudi.com/plat/v")
+            )
+            legacy_pattern, legacy_action = rules.DONGQIUDI_LEGACY_REWRITE_RULE.rsplit(
+                " ",
+                1,
+            )
+            self.assertEqual(legacy_action, "reject")
+            self.assertIsNotNone(
+                re.match(legacy_pattern, "https://ap.dongqiudi.com/plat/v4")
+            )
+            self.assertIsNone(
+                re.match(legacy_pattern, "https://ap.dongqiudi.com/plat/v")
+            )
+            self.assertIn(
+                "hostname = ap.dongdianqiu.com,ap.dongqiudi.com,fixture.example",
+                generated,
+            )
+            for hostname in rules.DONGQIUDI_MITM_HOSTNAMES:
+                with self.subTest(dongqiudi_hostname=hostname):
+                    self.assertNotIn(f"DOMAIN,{hostname},REJECT", generated)
+                    self.assertNotIn(f"DOMAIN-SUFFIX,{hostname},REJECT", generated)
+            self.assertTrue(generated.rstrip().endswith("fixture.example"))
             self.assertIn(f"FINAL,{rules.default_node}", generated)
             self.assertEqual(generated.upper().count("\nFINAL,"), 1)
             self.assertNotIn(",no-resolve,DIRECT", generated)
             self.assertNotIn(f",no-resolve,{rules.openai_node}", generated)
+
+    def test_dongqiudi_rules_deduplicate_matching_upstream_entries(self):
+        modified_johnshall = self.johnshall_content.replace(
+            "[Rule]\n",
+            f"[Rule]\n{rules.DONGQIUDI_AD_RULE}\n",
+            1,
+        ).replace(
+            "[URL Rewrite]\n",
+            (
+                f"[URL Rewrite]\n{rules.DONGQIUDI_REWRITE_RULE}\n"
+                f"{rules.DONGQIUDI_LEGACY_REWRITE_RULE}\n"
+            ),
+            1,
+        ).replace(
+            "hostname = fixture.example",
+            (
+                f"hostname = {rules.DONGQIUDI_MITM_HOSTNAME},"
+                f"{rules.DONGQIUDI_LEGACY_MITM_HOSTNAME},fixture.example"
+            ),
+            1,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+
+            def online_response(url, timeout, **kwargs):
+                return self.online_response(
+                    url,
+                    timeout,
+                    modified_johnshall,
+                    **kwargs,
+                )
+
+            with self.relaxed_build_context(online_response):
+                generated = rules.build_config(
+                    output_path=root / "custom.conf",
+                    cache_dir=root / "cache",
+                    backup_dir=None,
+                    now=datetime.datetime(2026, 7, 15, 12, 34, 56),
+                    openai_generated_path=root / "audit" / "OpenAI.generated.list",
+                )
+
+        self.assertEqual(generated.count(rules.DONGQIUDI_AD_RULE), 1)
+        self.assertEqual(generated.count(rules.DONGQIUDI_REWRITE_RULE), 1)
+        self.assertEqual(generated.count(rules.DONGQIUDI_LEGACY_REWRITE_RULE), 1)
+        hostname_line = next(
+            line for line in generated.splitlines() if line.startswith("hostname = ")
+        )
+        self.assertEqual(hostname_line.count(rules.DONGQIUDI_MITM_HOSTNAME), 1)
+        self.assertEqual(
+            hostname_line.count(rules.DONGQIUDI_LEGACY_MITM_HOSTNAME),
+            1,
+        )
 
     def test_semantically_identical_rebuild_skips_timestamp_backup(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

@@ -25,6 +25,12 @@ ChatGPT Voice 继续由 VPSDance 与 v2fly 的 `chatgpt.livekit.cloud`、`host.l
 
 [DDcat2025/openai-shadowrocket-rules](https://github.com/DDcat2025/openai-shadowrocket-rules) 仅作为转换实现参考，不是生产数据源、运行时依赖或更新链路的一部分。
 
+## 懂球帝去广告
+
+生成器会固定注入一组经过审定的懂球帝规则：在 `[Rule]` 中拒绝 `apimg.qunliao.info` 广告资源，在 `[URL Rewrite]` 中精确拒绝新旧广告配置入口 `https://ap.dongdianqiu.com/plat/v4` 与 `https://ap.dongqiudi.com/plat/v4`，并把对应的两个域名合并进 `[MITM]` 的 `hostname`。URL 重写需要在 Shadowrocket 中启用 HTTPS 解密并信任其证书后才能生效；单独的域名拒绝规则不依赖 MITM。
+
+新入口参考 [fmz200/wool_scripts 当前启用的懂球帝条目](https://github.com/fmz200/wool_scripts/blob/main/Loon/plugin/split/partD/AllFootball.lpx)，旧入口由 [blackmatrix7/ios_rule_script](https://github.com/blackmatrix7/ios_rule_script/blob/master/rewrite/Loon/Advertising/Advertising.plugin) 与 [AWAvenue-Ads-Rule](https://github.com/TG-Twilight/AWAvenue-Ads-Rule/blob/main/AWAvenue-Ads-Rule.txt) 交叉验证。两条 URL Rewrite 都限定为 `/plat/v4`，不会拒绝整个懂球帝接口域名。
+
 ## 项目引用
 
 本项目借鉴和使用了以下开源项目的代码和规则：
@@ -33,6 +39,8 @@ ChatGPT Voice 继续由 VPSDance 与 v2fly 的 `chatgpt.livekit.cloud`、`host.l
 - [VPSDance/ai-proxy-rules](https://github.com/VPSDance/ai-proxy-rules) - 提供 OpenAI Shadowrocket 增量规则
 - [v2fly/domain-list-community](https://github.com/v2fly/domain-list-community) - 提供 OpenAI 核心域名增量
 - [blackmatrix7/ios_rule_script](https://github.com/blackmatrix7/ios_rule_script) - 提供 Claude、国内应用等既有规则，并作为本地 OpenAI 兼容基线的历史来源
+- [fmz200/wool_scripts](https://github.com/fmz200/wool_scripts) - 提供懂球帝广告域名、URL Rewrite 与 MITM 规则参考
+- [TG-Twilight/AWAvenue-Ads-Rule](https://github.com/TG-Twilight/AWAvenue-Ads-Rule) - 提供懂球帝新旧广告入口的交叉验证
 
 特此感谢以上项目的开发者们！
 

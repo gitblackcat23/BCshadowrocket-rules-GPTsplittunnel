@@ -183,6 +183,24 @@ copilot_domains = [
     "origin-tracker.githubusercontent.com",
 ]
 
+# Audited across focused rules from fmz200/wool_scripts,
+# blackmatrix7/ios_rule_script, and TG-Twilight/AWAvenue-Ads-Rule.
+# Keep these static so an unrelated upstream plugin change cannot silently broaden
+# the locally trusted REJECT/MITM surface during a scheduled build.
+DONGQIUDI_AD_RULE = "DOMAIN-KEYWORD,apimg.qunliao.info,REJECT"
+DONGQIUDI_REWRITE_RULE = r"^https?:\/\/ap\.dongdianqiu\.com\/plat\/v4 reject"
+DONGQIUDI_LEGACY_REWRITE_RULE = r"^https?:\/\/ap\.dongqiudi\.com\/plat\/v4 reject"
+DONGQIUDI_MITM_HOSTNAME = "ap.dongdianqiu.com"
+DONGQIUDI_LEGACY_MITM_HOSTNAME = "ap.dongqiudi.com"
+DONGQIUDI_REWRITE_RULES = (
+    DONGQIUDI_REWRITE_RULE,
+    DONGQIUDI_LEGACY_REWRITE_RULE,
+)
+DONGQIUDI_MITM_HOSTNAMES = (
+    DONGQIUDI_MITM_HOSTNAME,
+    DONGQIUDI_LEGACY_MITM_HOSTNAME,
+)
+
 # 国内外链规则字典
 domestic_lists = {
     "WeChat": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/WeChat/WeChat.list",
@@ -638,6 +656,71 @@ def _johnshall_rule_block(content, source_name):
     return rule_match, next_section, content[rule_body_start:next_section.start()]
 
 
+def inject_url_rewrite_rules(content, rules, marker, source_name):
+    """Prepend locally audited URL rewrites and remove exact upstream duplicates."""
+    rewrite_match = _single_section(content, "URL Rewrite", source_name)
+    mitm_match = _single_section(content, "MITM", source_name)
+    if rewrite_match.start() > mitm_match.start():
+        raise RuleValidationError(f"{source_name}: [URL Rewrite] 必须位于 [MITM] 之前")
+
+    body_start = _section_body_start(content, rewrite_match)
+    rewrite_body = content[body_start:mitm_match.start()]
+    exact_rules = set(rules)
+    filtered_body = "".join(
+        raw_line
+        for raw_line in rewrite_body.splitlines(keepends=True)
+        if raw_line.strip() not in exact_rules
+    )
+    custom_block = marker + "\n" + "\n".join(rules) + "\n\n"
+    return (
+        content[:body_start]
+        + custom_block
+        + filtered_body
+        + content[mitm_match.start():]
+    )
+
+
+def prepend_mitm_hostnames(content, hostnames, source_name):
+    """Add required MITM hosts to the single hostname line without duplicates."""
+    mitm_match = _single_section(content, "MITM", source_name)
+    sections = _section_matches(content)
+    following_sections = [
+        match for match in sections if match.start() > mitm_match.start()
+    ]
+    body_end = min(
+        (match.start() for match in following_sections),
+        default=len(content),
+    )
+    body_start = _section_body_start(content, mitm_match)
+    mitm_body = content[body_start:body_end]
+    hostname_matches = list(
+        re.finditer(r"(?m)^(hostname[ \t]*=[ \t]*)([^\r\n]*)", mitm_body)
+    )
+    if len(hostname_matches) != 1:
+        raise RuleValidationError(
+            f"{source_name}: [MITM] 需要且只能有一个 hostname 行，实际为 {len(hostname_matches)} 个"
+        )
+
+    hostname_match = hostname_matches[0]
+    existing = [
+        item.strip()
+        for item in hostname_match.group(2).split(",")
+        if item.strip()
+    ]
+    existing_lower = {item.lower() for item in existing}
+    additions = [
+        hostname for hostname in hostnames if hostname.lower() not in existing_lower
+    ]
+    combined = additions + existing
+    replacement = hostname_match.group(1) + ",".join(combined)
+    rewritten_body = (
+        mitm_body[:hostname_match.start()]
+        + replacement
+        + mitm_body[hostname_match.end():]
+    )
+    return content[:body_start] + rewritten_body + content[body_end:]
+
+
 def validate_johnshall_content(content, source_name, baseline_count=None, content_type=""):
     _reject_empty_or_html(content, source_name, content_type)
     _, _, rule_block = _johnshall_rule_block(content, source_name)
@@ -1021,9 +1104,58 @@ def validate_generated_config(content, source_name="生成配置", min_rule_coun
     if final_indexes[0] != len(active_rules) - 1:
         raise RuleValidationError(f"{source_name}: FINAL 不是 [Rule] 中最后一条有效规则")
 
+    if active_rules.count(DONGQIUDI_AD_RULE) != 1:
+        raise RuleValidationError(
+            f"{source_name}: 懂球帝域名拦截规则数量不是 1"
+        )
+
+    rewrite_match = required_matches[2]
+    mitm_match = required_matches[3]
+    rewrite_block = content[
+        _section_body_start(content, rewrite_match):mitm_match.start()
+    ]
+    rewrite_rules = [
+        line.strip()
+        for line in rewrite_block.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    for rewrite_rule in DONGQIUDI_REWRITE_RULES:
+        if rewrite_rules.count(rewrite_rule) != 1:
+            raise RuleValidationError(
+                f"{source_name}: 懂球帝 URL Rewrite 规则数量不是 1: {rewrite_rule}"
+            )
+
+    following_sections = [
+        match for match in sections if match.start() > mitm_match.start()
+    ]
+    mitm_end = min(
+        (match.start() for match in following_sections),
+        default=len(content),
+    )
+    mitm_block = content[_section_body_start(content, mitm_match):mitm_end]
+    hostname_lines = [
+        line for line in mitm_block.splitlines()
+        if re.match(r"^hostname[ \t]*=", line.strip(), flags=re.IGNORECASE)
+    ]
+    if len(hostname_lines) != 1:
+        raise RuleValidationError(
+            f"{source_name}: [MITM] hostname 行数量不是 1"
+        )
+    mitm_hostnames = [
+        hostname.strip().lower()
+        for hostname in hostname_lines[0].split("=", 1)[1].split(",")
+        if hostname.strip()
+    ]
+    for hostname in DONGQIUDI_MITM_HOSTNAMES:
+        if mitm_hostnames.count(hostname) != 1:
+            raise RuleValidationError(
+                f"{source_name}: 懂球帝 MITM hostname 数量不是 1: {hostname}"
+            )
+
     required_markers = [
         "# Apple & iCloud Services (DIRECT)",
         "# Tonghuashun (DIRECT)",
+        "# Dongqiudi Ads (REJECT)",
         "# OpenAI (使用节点:",
         "# Claude 全家桶 (使用节点:",
         "# GitHub Copilot & Codex (使用节点:",
@@ -1137,13 +1269,18 @@ def build_config(
 
     print(f"[{now}] 开始构建规则...")
 
-    # 1. 构建硬编码极高优先级 (Apple & 同花顺)
+    # 1. 构建硬编码极高优先级 (Apple、同花顺与懂球帝广告拦截)
     apple_rules_str = f"# Apple & iCloud Services (DIRECT) - {now.strftime('%Y-%m-%d')}\n"
     apple_rules_str += "".join([f"DOMAIN-SUFFIX,{d},DIRECT\n" for d in apple_domains]) + "\n"
     apple_rules_str += "".join([f"DOMAIN-KEYWORD,{d},DIRECT\n" for d in apple_keywords]) + "\n"
 
     tonghuashun_rules_str = f"# Tonghuashun (DIRECT) - {now.strftime('%Y-%m-%d')}\n"
     tonghuashun_rules_str += "".join([f"DOMAIN-SUFFIX,{d},DIRECT\n" for d in tonghuashun_domains]) + "\n"
+
+    dongqiudi_rules_str = (
+        "# Dongqiudi Ads (REJECT) - 懂球帝去广告\n"
+        f"{DONGQIUDI_AD_RULE}\n\n"
+    )
 
     # 2. 构建 Copilot & OpenAI 强制分流
     copilot_rules_str = f"# GitHub Copilot & Codex (使用节点: {openai_node})\n"
@@ -1252,11 +1389,27 @@ def build_config(
         "DOMAIN-SUFFIX,www-cdn.icloud.com.akadns.net,Proxy",
         "DOMAIN-SUFFIX,metrics.icloud.com,Reject",
     }
+    locally_owned_rules = {
+        DONGQIUDI_AD_RULE.upper(),
+    }
     j_rules_clean = "\n".join([
         line for line in j_rules_raw.splitlines()
         if line.strip().split(",", 1)[0].upper() not in {"FINAL", "MATCH"}
         and line.strip() not in upstream_apple_conflicts
+        and line.strip().upper() not in locally_owned_rules
     ])
+
+    after_rules = inject_url_rewrite_rules(
+        after_rules,
+        DONGQIUDI_REWRITE_RULES,
+        "# Dongqiudi Ads - 懂球帝开屏/跳转广告",
+        "Johnshall 后置区块",
+    )
+    after_rules = prepend_mitm_hostnames(
+        after_rules,
+        DONGQIUDI_MITM_HOSTNAMES,
+        "Johnshall 后置区块",
+    )
 
     # 4. 并行获取并内联国内直连规则，客户端只执行构建时校验过的内容。
     domestic_rules_str = "\n# --- 国内常用 APP 及服务 (DIRECT) ---\n"
@@ -1288,6 +1441,7 @@ def build_config(
     final_rules = (
         apple_rules_str
         + tonghuashun_rules_str
+        + dongqiudi_rules_str
         + openai_rules_str
         + claude_rules_str
         + copilot_rules_str
