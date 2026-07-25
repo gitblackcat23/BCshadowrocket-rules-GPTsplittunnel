@@ -11,25 +11,6 @@
 - 定时更新任务使用 `--no-backup`，由 Git 历史承担 CI 版本追溯，避免仓库中的时间戳备份无限增长；既有历史备份不会被生成器自动删除。
 - push 和 pull request 会运行只读 CI（单元测试和现有配置校验）；定时任务仍负责联网更新规则及缓存。
 
-## OpenAI 分流策略
-
-OpenAI 规则采用“本地宽兼容基线 + 多源增量”的保守策略，优先避免漏分流：
-
-- 本地宽兼容基线来自审定时的 VPSDance 与 blackmatrix OpenAI 规则并集。基线固定保存在本仓库，不会因为任一上游以后删除规则而自动缩减；blackmatrix OpenAI 不再作为每日生产源或监控源。
-- 每日生产增量来自 [VPSDance/ai-proxy-rules](https://github.com/VPSDance/ai-proxy-rules) 和 [v2fly/domain-list-community](https://github.com/v2fly/domain-list-community)。经过格式、数量和关键内容校验后才会合并。
-- 宽基线唯一明确排除 `IP-ASN,20473,no-resolve`，因为 AS20473 是范围过大的共享托管网络，并非 OpenAI 专属。其余已审定的宽规则、OpenAI 网络段和旧兼容规则继续保留。
-- 生成结果写入 `rules/openai/` 供审计，并直接内联到最终配置；Shadowrocket 运行时不再从第三方下载 OpenAI `RULE-SET`，确保客户端使用的就是构建时已校验的版本。
-- 每个动态来源都有独立的 last-known-good（最后已知可用）缓存。在线内容不可用或校验失败时继续使用对应缓存；只有完整配置通过最终校验后，才更新配置和缓存。
-
-ChatGPT Voice 继续由 VPSDance 与 v2fly 的 `chatgpt.livekit.cloud`、`host.livekit.cloud`、`turn.livekit.cloud` 等 Advanced Voice/LiveKit 域名覆盖，并保留固定兼容基线中的既有规则。由于住宅节点不支持 UDP，本项目不再导入面向防火墙放行的 `chatgpt-voice.json` 动态媒体 IP，避免把 `UDP/3478` 强制送入无法转发 UDP 的节点。
-
-[DDcat2025/openai-shadowrocket-rules](https://github.com/DDcat2025/openai-shadowrocket-rules) 仅作为转换实现参考，不是生产数据源、运行时依赖或更新链路的一部分。
-
-## 懂球帝去广告
-
-生成器会固定注入一组经过审定的懂球帝规则：在 `[Rule]` 中拒绝 `apimg.qunliao.info` 广告资源，在 `[URL Rewrite]` 中精确拒绝新旧广告配置入口 `https://ap.dongdianqiu.com/plat/v4` 与 `https://ap.dongqiudi.com/plat/v4`，并把对应的两个域名合并进 `[MITM]` 的 `hostname`。URL 重写需要在 Shadowrocket 中启用 HTTPS 解密并信任其证书后才能生效；单独的域名拒绝规则不依赖 MITM。
-
-新入口参考 [fmz200/wool_scripts 当前启用的懂球帝条目](https://github.com/fmz200/wool_scripts/blob/main/Loon/plugin/split/partD/AllFootball.lpx)，旧入口由 [blackmatrix7/ios_rule_script](https://github.com/blackmatrix7/ios_rule_script/blob/master/rewrite/Loon/Advertising/Advertising.plugin) 与 [AWAvenue-Ads-Rule](https://github.com/TG-Twilight/AWAvenue-Ads-Rule/blob/main/AWAvenue-Ads-Rule.txt) 交叉验证。两条 URL Rewrite 都限定为 `/plat/v4`，不会拒绝整个懂球帝接口域名。
 
 ## 项目引用
 
