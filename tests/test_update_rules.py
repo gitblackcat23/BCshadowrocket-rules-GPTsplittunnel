@@ -41,7 +41,7 @@ def first_embedded_domain_policy(config, hostname):
 
 def openai_embedded_block(config):
     start = config.index("# OpenAI (使用节点:")
-    end = config.index("# Claude 全家桶 (使用节点:", start)
+    end = config.index("# GitHub Copilot & Codex (使用节点:", start)
     return config[start:end]
 
 
@@ -122,7 +122,6 @@ class RuleGeneratorTests(unittest.TestCase):
         (cache_dir / "OpenAI_v2fly.txt").write_text(
             self.openai_v2fly_content, encoding="utf-8"
         )
-        (cache_dir / "Claude.list").write_text(self.provider_content, encoding="utf-8")
         (cache_dir / "johnshall_latest.conf").write_text(
             self.johnshall_content, encoding="utf-8"
         )
@@ -148,6 +147,76 @@ class RuleGeneratorTests(unittest.TestCase):
             rules.attach_policy("DOMAIN-SUFFIX,fixture.example", "DIRECT"),
             "DOMAIN-SUFFIX,fixture.example,DIRECT",
         )
+        self.assertEqual(
+            rules.attach_policy("DST-PORT,123", "V3 Static Residential"),
+            "DST-PORT,123,V3 Static Residential",
+        )
+
+    def test_dst_port_validation_accepts_ntp_and_rejects_invalid_ranges(self):
+        self.assertEqual(
+            rules.validate_provider_rule(
+                "DST-PORT,123",
+                allowed_rule_types=rules.PINNED_PROVIDER_RULE_TYPES,
+            ),
+            ["DST-PORT", "123"],
+        )
+        with self.assertRaisesRegex(rules.RuleValidationError, "不支持的规则类型"):
+            rules.validate_provider_content(
+                "DST-PORT,123\n",
+                "Untrusted dynamic provider",
+            )
+        with self.assertRaisesRegex(rules.RuleValidationError, "未知规则类型"):
+            rules.validate_routed_rule(
+                "DST-PORT,123,Proxy",
+                "Untrusted Johnshall provider",
+                1,
+                allow_match=True,
+            )
+        rules.validate_routed_rule(
+            "DST-PORT,123,V3 Static Residential",
+            "NTP routed fixture",
+            1,
+        )
+        for target in ("0", "65536", "abc", "200-100"):
+            with self.subTest(target=target), self.assertRaises(rules.RuleValidationError):
+                rules.validate_provider_rule(
+                    f"DST-PORT,{target}",
+                    allowed_rule_types=rules.PINNED_PROVIDER_RULE_TYPES,
+                )
+
+    def test_pinned_claude_sources_are_complete_and_policy_compatible(self):
+        groups = rules.build_claude_rule_groups()
+        primary = groups["primary_priority"] + groups["network"] + groups["ntp"]
+        legacy = groups["legacy_priority"]
+        official = groups["official_priority"]
+
+        self.assertEqual(len(primary), rules.CLAUDE_SCCR2685_RULE_COUNT)
+        self.assertEqual(len(legacy), rules.CLAUDE_LEGACY_EXTRA_RULE_COUNT)
+        self.assertEqual(official, ["DOMAIN,registry.npmjs.org"])
+        self.assertEqual(groups["network"], [
+            "IP-CIDR,160.79.104.0/21,no-resolve",
+            "IP-CIDR6,2607:6bc0::/32,no-resolve",
+            "IP-ASN,399358,no-resolve",
+        ])
+        self.assertEqual(groups["ntp"], ["DST-PORT,123"])
+        self.assertEqual(len(primary + legacy + official), 55)
+        self.assertEqual(len(primary + legacy + official), len(set(primary + legacy + official)))
+
+        with mock.patch.object(rules, "claude_node", "Different Claude Node"):
+            with self.assertRaisesRegex(rules.RuleValidationError, "破坏受保护分流"):
+                rules.build_claude_rule_groups()
+
+    def test_pinned_claude_source_digest_rejects_silent_rule_changes(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            altered_path = Path(temporary_dir) / "sccr2685.list"
+            content = rules.CLAUDE_SCCR2685_PATH.read_text(encoding="utf-8")
+            altered_path.write_text(
+                content.replace("DOMAIN,api.anthropic.com", "DOMAIN,api.changed.example"),
+                encoding="utf-8",
+            )
+            with mock.patch.object(rules, "CLAUDE_SCCR2685_PATH", altered_path):
+                with self.assertRaisesRegex(rules.RuleValidationError, "摘要不匹配"):
+                    rules.build_claude_rule_groups()
 
     def test_ip_cidr6_enforces_ipv6_while_legacy_ip_cidr_accepts_both_families(self):
         self.assertEqual(
@@ -280,7 +349,7 @@ class RuleGeneratorTests(unittest.TestCase):
 
                 with mock.patch.object(rules.requests, "get", return_value=response):
                     is_online, content = rules.fetch_or_fallback(
-                        rules.claude_url,
+                        rules.openai_vps_url,
                         cache_path,
                         "Fixture provider",
                         rules.validate_provider_content,
@@ -309,9 +378,9 @@ class RuleGeneratorTests(unittest.TestCase):
                 mock.patch.object(rules.time, "sleep"),
             ):
                 is_online, content = rules.fetch_or_fallback(
-                    rules.claude_url,
+                    rules.openai_vps_url,
                     cache_path,
-                    "Claude",
+                    "Fixture provider",
                     rules.validate_provider_content,
                 )
 
@@ -329,7 +398,7 @@ class RuleGeneratorTests(unittest.TestCase):
                 mock.patch.object(rules, "SOURCE_DOWNLOAD_ATTEMPTS", 1),
             ):
                 is_online, content = rules.fetch_or_fallback(
-                    rules.claude_url,
+                    rules.openai_vps_url,
                     root / "redirected.list",
                     "Redirect fixture",
                     rules.validate_provider_content,
@@ -345,7 +414,7 @@ class RuleGeneratorTests(unittest.TestCase):
                 mock.patch.object(rules, "MAX_SOURCE_BYTES", 8),
             ):
                 is_online, content = rules.fetch_or_fallback(
-                    rules.claude_url,
+                    rules.openai_vps_url,
                     root / "oversized.list",
                     "Oversized fixture",
                     rules.validate_provider_content,
@@ -366,14 +435,14 @@ class RuleGeneratorTests(unittest.TestCase):
             specifications = [
                 (
                     "first",
-                    rules.claude_url,
+                    rules.openai_vps_url,
                     root / "first.list",
                     "Fixture first",
                     rules.validate_provider_content,
                 ),
                 (
                     "second",
-                    rules.claude_url,
+                    rules.openai_vps_url,
                     root / "second.list",
                     "Fixture second",
                     rules.validate_provider_content,
@@ -468,11 +537,12 @@ class RuleGeneratorTests(unittest.TestCase):
             self.assertFalse((cache_dir / "OpenAI_voice.json").exists())
 
             ordered_markers = [
+                "# Claude SCCR2685 全家桶 (使用节点:",
                 "# Apple & iCloud Services (DIRECT)",
+                "# Claude SCCR2685 NTP 兜底 (使用节点:",
                 "# Tonghuashun (DIRECT)",
                 "# Dongqiudi Ads (REJECT)",
                 "# OpenAI (使用节点:",
-                "# Claude 全家桶 (使用节点:",
                 "# GitHub Copilot & Codex (使用节点:",
                 "# --- Johnshall 去广告与基础代理区块 ---",
                 "# --- 国内常用 APP 及服务 (DIRECT) ---",
@@ -480,6 +550,22 @@ class RuleGeneratorTests(unittest.TestCase):
             ]
             positions = [generated.index(marker) for marker in ordered_markers]
             self.assertEqual(positions, sorted(positions))
+            _, _, generated_rule_block = rules._johnshall_rule_block(
+                generated, "Generated fixture"
+            )
+            first_active_rule = next(
+                line.strip()
+                for line in generated_rule_block.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            )
+            self.assertEqual(
+                first_active_rule,
+                f"DOMAIN,api.anthropic.com,{rules.claude_node}",
+            )
+            self.assertLess(
+                generated.index("DOMAIN-SUFFIX,time.apple.com,DIRECT"),
+                generated.index(f"DST-PORT,123,{rules.claude_node}"),
+            )
 
             openai_block = openai_embedded_block(generated)
             self.assertNotIn("RULE-SET,", openai_block)
@@ -528,14 +614,29 @@ class RuleGeneratorTests(unittest.TestCase):
                 first_embedded_domain_policy(generated, "claude.ai"),
                 rules.claude_node,
             )
+            for hostname in (
+                "storage.googleapis.com",
+                "raw.githubusercontent.com",
+                "registry.npmjs.org",
+                "bridge.claudeusercontent.com",
+            ):
+                with self.subTest(claude_hostname=hostname):
+                    self.assertEqual(
+                        first_embedded_domain_policy(generated, hostname),
+                        rules.claude_node,
+                    )
             self.assertEqual(
                 first_embedded_domain_policy(generated, rules.copilot_domains[0]),
                 rules.openai_node,
             )
             self.assertIn(
-                f"DOMAIN-SUFFIX,fixture.example,{rules.claude_node}", generated
+                f"DOMAIN,registry.npmjs.org,{rules.claude_node}", generated
             )
-            self.assertIn("# Claude 上游补充规则 (在线校验快照内联)", generated)
+            self.assertIn(
+                f"IP-ASN,399358,{rules.claude_node},no-resolve", generated
+            )
+            self.assertIn(f"DST-PORT,123,{rules.claude_node}", generated)
+            self.assertNotIn("# Claude 上游补充规则", generated)
             self.assertIn(
                 f"DOMAIN,{rules.copilot_domains[0]},{rules.openai_node}", generated
             )
@@ -730,7 +831,7 @@ class RuleGeneratorTests(unittest.TestCase):
                 first_embedded_domain_policy(generated, rules.copilot_domains[0]),
                 rules.openai_node,
             )
-            self.assertIn(f"IP-ASN,64500,{rules.claude_node},no-resolve", generated)
+            self.assertIn(f"IP-ASN,399358,{rules.claude_node},no-resolve", generated)
             self.assertEqual(
                 generated.count("DOMAIN-SUFFIX,fixture.example,DIRECT"),
                 len(rules.domestic_lists),
@@ -937,6 +1038,23 @@ class RuleGeneratorTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(rules.RuleValidationError, "禁止运行时 RULE-SET"):
             rules.validate_generated_config(config, min_rule_count=1)
+
+    def test_daily_workflow_generates_validates_and_commits_the_config(self):
+        workflow_path = rules.REPOSITORY_DIR / ".github/workflows/update-rules.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+
+        self.assertIn("cron: '8 0 * * *'", workflow)
+        generate_command = "python update_rules.py --no-backup"
+        validate_command = (
+            "python update_rules.py --validate-config custom_shadowrocket_rules.conf"
+        )
+        self.assertEqual(workflow.count(generate_command), 1)
+        self.assertEqual(workflow.count(validate_command), 1)
+        self.assertLess(workflow.index(generate_command), workflow.index(validate_command))
+        self.assertRegex(
+            workflow,
+            r"file_pattern:.*custom_shadowrocket_rules\.conf",
+        )
 
     def test_multi_file_publish_failure_rolls_back_every_target(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

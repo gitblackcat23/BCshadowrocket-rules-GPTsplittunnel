@@ -17,7 +17,8 @@ import requests
 # ================= 基础配置 =================
 default_node = "V3(vless+vision+reality)"
 openai_node = "V3 Static Residential"
-# 新增：Claude 专用固定线路（建议与 OpenAI 共用或单独指定你的纯净 IP 节点名称）
+# SCCR2685 含 OpenAI 也会使用的共享基础设施规则。若要让两者使用不同
+# 节点，必须先缩窄这些共享规则并完成受保护分流审计。
 claude_node = "V3 Static Residential"
 
 DEFAULT_CACHE_DIR = Path("backups/rules_cache")
@@ -28,6 +29,18 @@ OPENAI_RULES_DIR = REPOSITORY_DIR / "rules/openai"
 OPENAI_COMPATIBILITY_PATH = OPENAI_RULES_DIR / "compatibility-baseline.list"
 OPENAI_OFFICIAL_PATH = OPENAI_RULES_DIR / "official-extra.list"
 OPENAI_GENERATED_PATH = OPENAI_RULES_DIR / "generated.list"
+CLAUDE_RULES_DIR = REPOSITORY_DIR / "rules/claude"
+CLAUDE_SCCR2685_PATH = CLAUDE_RULES_DIR / "sccr2685.list"
+CLAUDE_LEGACY_EXTRA_PATH = CLAUDE_RULES_DIR / "legacy-extra.list"
+CLAUDE_SCCR2685_RULE_COUNT = 39
+CLAUDE_LEGACY_EXTRA_RULE_COUNT = 15
+CLAUDE_SCCR2685_SHA256 = "d36acf549e26fba491436a8b42c1c98de1db0f669f70ff2c8a368eb5efc1f817"
+CLAUDE_LEGACY_EXTRA_SHA256 = "032059abf3b92ba23925d9e398482df5fd890079aea27538c9e4e0153952f3f0"
+CLAUDE_OFFICIAL_EXTRA_RULES = (
+    # Anthropic 官方说明 npm/bun 安装需要访问该共享 registry；用户于
+    # 2026-08-05 明确批准纳入 Claude 固定出口。
+    "DOMAIN,registry.npmjs.org",
+)
 SOURCE_TIMEOUT_SECONDS = 12
 SOURCE_CONNECT_TIMEOUT_SECONDS = 5
 SOURCE_DOWNLOAD_ATTEMPTS = 3
@@ -50,7 +63,6 @@ MIN_GENERATED_RULES = 10_000
 SOURCE_BASELINE_RULE_COUNTS = {
     "OpenAI VPSDance": 45,
     "OpenAI v2fly": 23,
-    "Claude": 3,
     "WeChat": 33,
     "WeType": 1,
     "Zhihu": 7,
@@ -92,15 +104,23 @@ PROVIDER_RULE_TYPES = {
     "IP-ASN",
 }
 
-GENERATED_RULE_TYPES = PROVIDER_RULE_TYPES | {
+PINNED_PROVIDER_RULE_TYPES = PROVIDER_RULE_TYPES | {"DST-PORT"}
+
+GENERATED_RULE_TYPES = PINNED_PROVIDER_RULE_TYPES | {
     "GEOIP",
     "RULE-SET",
     "FINAL",
 }
 
 # Johnshall historically may use MATCH as an upstream terminator; the generator
-# intentionally removes MATCH/FINAL and writes its own single FINAL.
-JOHNSHALL_RULE_TYPES = GENERATED_RULE_TYPES | {"MATCH"}
+# intentionally removes MATCH/FINAL and writes its own single FINAL. Keep
+# pinned-only DST-PORT unavailable to this dynamic upstream.
+JOHNSHALL_RULE_TYPES = PROVIDER_RULE_TYPES | {
+    "GEOIP",
+    "RULE-SET",
+    "FINAL",
+    "MATCH",
+}
 
 OPENAI_MIN_MERGED_RULES = 65
 OPENAI_V2FLY_REGEX_RULES = {
@@ -236,7 +256,6 @@ domestic_lists = {
 
 openai_vps_url = "https://raw.githubusercontent.com/VPSDance/ai-proxy-rules/main/rules/shadowrocket/openai.list"
 openai_v2fly_url = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/openai"
-claude_url = "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Claude/Claude.list"
 johnshall_url = "https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf"
 
 
@@ -295,7 +314,7 @@ def _check_rule_count_ratio(source_name, rule_count, baseline_count):
         )
 
 
-def provider_rule_lines(content, source_name):
+def provider_rule_lines(content, source_name, allowed_rule_types=None):
     lines = []
     for line_number, raw_line in enumerate(content.splitlines(), start=1):
         line = raw_line.strip()
@@ -303,7 +322,12 @@ def provider_rule_lines(content, source_name):
             continue
         if line.startswith("["):
             raise RuleValidationError(f"{source_name}:{line_number}: provider 列表不应包含配置区块")
-        validate_provider_rule(line, source_name, line_number)
+        validate_provider_rule(
+            line,
+            source_name,
+            line_number,
+            allowed_rule_types=allowed_rule_types,
+        )
         lines.append(line)
     return lines
 
@@ -348,6 +372,17 @@ def _validate_asn(target, location):
         raise RuleValidationError(f"{location}: ASN 格式或范围不合法 {target!r}")
 
 
+def _validate_port(target, location):
+    bounds = target.split("-", 1)
+    if any(not bound.isdigit() for bound in bounds):
+        raise RuleValidationError(f"{location}: 端口格式不合法 {target!r}")
+    ports = [int(bound) for bound in bounds]
+    if any(not 1 <= port <= 65_535 for port in ports):
+        raise RuleValidationError(f"{location}: 端口超出 1～65535 {target!r}")
+    if len(ports) == 2 and ports[0] > ports[1]:
+        raise RuleValidationError(f"{location}: 端口范围起点大于终点 {target!r}")
+
+
 def _validate_policy(policy, location):
     # Tolerate the one existing upstream inline comment without treating it as
     # part of the policy name, while preserving the original line byte-for-byte.
@@ -360,17 +395,30 @@ def _validate_policy(policy, location):
         raise RuleValidationError(f"{location}: 策略为空、错位或含控制字符")
 
 
-def validate_provider_rule(line, source_name="规则源", line_number=None):
+def validate_provider_rule(
+    line,
+    source_name="规则源",
+    line_number=None,
+    allowed_rule_types=None,
+):
     location = f"{source_name}:{line_number}" if line_number is not None else source_name
     parts = [part.strip() for part in line.split(",")]
-    if not parts or parts[0].upper() not in PROVIDER_RULE_TYPES:
+    if allowed_rule_types is None:
+        allowed_rule_types = PROVIDER_RULE_TYPES
+    if not parts or parts[0].upper() not in allowed_rule_types:
         rule_type = parts[0] if parts else ""
         raise RuleValidationError(f"{location}: 不支持的规则类型 {rule_type!r}")
     if len(parts) < 2 or not parts[1]:
         raise RuleValidationError(f"{location}: 规则目标为空")
 
     rule_type = parts[0].upper()
-    if rule_type in {"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "USER-AGENT"}:
+    if rule_type in {
+        "DOMAIN",
+        "DOMAIN-SUFFIX",
+        "DOMAIN-KEYWORD",
+        "USER-AGENT",
+        "DST-PORT",
+    }:
         if len(parts) != 2:
             raise RuleValidationError(f"{location}: {rule_type} 应为两个字段且不能预带策略")
     elif len(parts) not in {2, 3}:
@@ -393,6 +441,8 @@ def validate_provider_rule(line, source_name="规则源", line_number=None):
         _validate_cidr(target, location, 6)
     elif rule_type == "IP-ASN":
         _validate_asn(target, location)
+    elif rule_type == "DST-PORT":
+        _validate_port(target, location)
     return parts
 
 
@@ -439,6 +489,10 @@ def validate_routed_rule(line, source_name, line_number, allow_match=False):
         _validate_asn(parts[1], location)
         if len(parts) == 4 and parts[3].lower() != "no-resolve":
             raise RuleValidationError(f"{location}: IP-ASN 可选字段只能是 no-resolve")
+    elif rule_type == "DST-PORT":
+        if len(parts) != 3:
+            raise RuleValidationError(f"{location}: DST-PORT 字段数量不合法")
+        _validate_port(parts[1], location)
     elif rule_type == "GEOIP":
         if len(parts) != 3 or not re.fullmatch(r"[A-Za-z]{2}", parts[1]):
             raise RuleValidationError(f"{location}: GEOIP 国家代码或字段数量不合法")
@@ -449,9 +503,19 @@ def validate_routed_rule(line, source_name, line_number, allow_match=False):
     return parts
 
 
-def validate_provider_content(content, source_name, baseline_count=None, content_type=""):
+def validate_provider_content(
+    content,
+    source_name,
+    baseline_count=None,
+    content_type="",
+    allowed_rule_types=None,
+):
     _reject_empty_or_html(content, source_name, content_type)
-    lines = provider_rule_lines(content, source_name)
+    lines = provider_rule_lines(
+        content,
+        source_name,
+        allowed_rule_types=allowed_rule_types,
+    )
     if not lines:
         raise RuleValidationError(f"{source_name}: 没有有效规则")
     canonical_source_name = source_name.removesuffix(" 本地缓存")
@@ -464,9 +528,17 @@ def validate_provider_content(content, source_name, baseline_count=None, content
     return len(lines)
 
 
-def normalize_provider_rule(line, source_name="OpenAI 规则"):
+def normalize_provider_rule(
+    line,
+    source_name="OpenAI 规则",
+    allowed_rule_types=None,
+):
     """Return a canonical provider rule while preserving matching semantics."""
-    parts = validate_provider_rule(line, source_name)
+    parts = validate_provider_rule(
+        line,
+        source_name,
+        allowed_rule_types=allowed_rule_types,
+    )
     rule_type = parts[0].upper()
     target = parts[1]
 
@@ -478,6 +550,8 @@ def normalize_provider_rule(line, source_name="OpenAI 规则"):
         target = str(ipaddress.ip_network(target, strict=False))
     elif rule_type == "IP-ASN":
         target = target[2:] if target.upper().startswith("AS") else target
+    elif rule_type == "DST-PORT":
+        target = "-".join(str(int(bound)) for bound in target.split("-", 1))
 
     normalized = [rule_type, target]
     if len(parts) == 3:
@@ -561,10 +635,122 @@ def validate_v2fly_openai_content(content, source_name, baseline_count=None, con
     return len(lines)
 
 
-def local_openai_rule_lines(path, source_name):
+def local_provider_rule_lines(path, source_name, allowed_rule_types=None):
     content = read_text_strict(path, source_name)
-    validate_provider_content(content, source_name)
-    return [normalize_provider_rule(line, source_name) for line in provider_rule_lines(content, source_name)]
+    validate_provider_content(
+        content,
+        source_name,
+        allowed_rule_types=allowed_rule_types,
+    )
+    return [
+        normalize_provider_rule(
+            line,
+            source_name,
+            allowed_rule_types=allowed_rule_types,
+        )
+        for line in provider_rule_lines(
+            content,
+            source_name,
+            allowed_rule_types=allowed_rule_types,
+        )
+    ]
+
+
+def local_openai_rule_lines(path, source_name):
+    return local_provider_rule_lines(path, source_name)
+
+
+def _pinned_rule_digest(lines):
+    payload = ("\n".join(lines) + "\n").encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _load_pinned_claude_rules(path, source_name, expected_count, expected_digest):
+    lines = local_provider_rule_lines(
+        path,
+        source_name,
+        allowed_rule_types=PINNED_PROVIDER_RULE_TYPES,
+    )
+    if len(lines) != expected_count:
+        raise RuleValidationError(
+            f"{source_name}: 规则数量为 {len(lines)}，预期 {expected_count}"
+        )
+    if len(lines) != len(set(lines)):
+        raise RuleValidationError(f"{source_name}: 含文本重复项")
+
+    digest = _pinned_rule_digest(lines)
+    if digest != expected_digest:
+        raise RuleValidationError(
+            f"{source_name}: 固定内容摘要不匹配，实际 sha256={digest}"
+        )
+    return lines
+
+
+def build_claude_rule_groups():
+    if claude_node != openai_node:
+        raise RuleValidationError(
+            "SCCR2685 含 Sentry、Statsig、Intercom、Datadog 等 OpenAI 共享规则；"
+            "Claude 与 OpenAI 节点不一致时会破坏受保护分流"
+        )
+
+    primary_rules = _load_pinned_claude_rules(
+        CLAUDE_SCCR2685_PATH,
+        "Claude SCCR2685 固定主规则",
+        CLAUDE_SCCR2685_RULE_COUNT,
+        CLAUDE_SCCR2685_SHA256,
+    )
+    legacy_rules = _load_pinned_claude_rules(
+        CLAUDE_LEGACY_EXTRA_PATH,
+        "Claude 原有兼容补充",
+        CLAUDE_LEGACY_EXTRA_RULE_COUNT,
+        CLAUDE_LEGACY_EXTRA_SHA256,
+    )
+    official_rules = [
+        normalize_provider_rule(line, "Claude 官方条件补充")
+        for line in CLAUDE_OFFICIAL_EXTRA_RULES
+    ]
+
+    combined = primary_rules + legacy_rules + official_rules
+    if len(combined) != len(set(combined)):
+        raise RuleValidationError("Claude SCCR2685、原有兼容与官方条件补充含文本重复项")
+
+    priority_types = {
+        "DOMAIN",
+        "DOMAIN-SUFFIX",
+        "DOMAIN-KEYWORD",
+        "USER-AGENT",
+    }
+    network_types = {"IP-CIDR", "IP-CIDR6", "IP-ASN"}
+    primary_priority = [
+        line for line in primary_rules if line.split(",", 1)[0] in priority_types
+    ]
+    primary_network = [
+        line for line in primary_rules if line.split(",", 1)[0] in network_types
+    ]
+    primary_ntp = [
+        line for line in primary_rules if line.split(",", 1)[0] == "DST-PORT"
+    ]
+    if len(primary_priority) + len(primary_network) + len(primary_ntp) != len(primary_rules):
+        raise RuleValidationError("Claude SCCR2685 出现未分组的规则类型")
+    if primary_ntp != ["DST-PORT,123"]:
+        raise RuleValidationError("Claude SCCR2685 NTP 兜底不是唯一的 DST-PORT,123")
+    if any(line.split(",", 1)[0] not in priority_types for line in legacy_rules):
+        raise RuleValidationError("Claude 原有兼容补充只能包含域名或 User-Agent 规则")
+    if any(line.split(",", 1)[0] != "DOMAIN" for line in official_rules):
+        raise RuleValidationError("Claude 官方条件补充只能包含精确域名")
+
+    print(
+        "-> Claude 固定规则已校验: "
+        f"SCCR2685={len(primary_rules)}, legacy={len(legacy_rules)}, "
+        f"official-extra={len(official_rules)}, merged={len(combined)}"
+    )
+    return {
+        "primary_priority": primary_priority,
+        "legacy_priority": legacy_rules,
+        "official_priority": official_rules,
+        "network": primary_network,
+        "ntp": primary_ntp,
+    }
 
 
 def merge_openai_rule_lines(*rule_groups):
@@ -746,7 +932,10 @@ def validate_johnshall_content(content, source_name, baseline_count=None, conten
 
 def attach_policy(line, policy):
     """Insert a policy before optional provider-rule options such as no-resolve."""
-    parts = validate_provider_rule(line)
+    parts = validate_provider_rule(
+        line,
+        allowed_rule_types=PINNED_PROVIDER_RULE_TYPES,
+    )
     if not policy or "," in policy or "\n" in policy or "\r" in policy:
         raise RuleValidationError("策略名称为空或包含非法分隔符")
     return ",".join(parts[:2] + [policy] + parts[2:])
@@ -1153,11 +1342,12 @@ def validate_generated_config(content, source_name="生成配置", min_rule_coun
             )
 
     required_markers = [
+        "# Claude SCCR2685 全家桶 (使用节点:",
         "# Apple & iCloud Services (DIRECT)",
+        "# Claude SCCR2685 NTP 兜底 (使用节点:",
         "# Tonghuashun (DIRECT)",
         "# Dongqiudi Ads (REJECT)",
         "# OpenAI (使用节点:",
-        "# Claude 全家桶 (使用节点:",
         "# GitHub Copilot & Codex (使用节点:",
         "# --- Johnshall 去广告与基础代理区块 ---",
         "# --- 国内常用 APP 及服务 (DIRECT) ---",
@@ -1171,6 +1361,35 @@ def validate_generated_config(content, source_name="生成配置", min_rule_coun
         marker_positions.append(position)
     if marker_positions != sorted(marker_positions):
         raise RuleValidationError(f"{source_name}: 主要规则区块顺序发生变化")
+
+    marker_by_prefix = dict(zip(required_markers, marker_positions))
+    claude_groups = build_claude_rule_groups()
+    expected_priority = [
+        attach_policy(line, claude_node)
+        for line in (
+            claude_groups["primary_priority"]
+            + claude_groups["legacy_priority"]
+            + claude_groups["official_priority"]
+            + claude_groups["network"]
+        )
+    ]
+    if active_rules[:len(expected_priority)] != expected_priority:
+        raise RuleValidationError(
+            f"{source_name}: Claude SCCR2685 域名/兼容/IP 规则未完整位于 [Rule] 最前"
+        )
+
+    ntp_rule = attach_policy(claude_groups["ntp"][0], claude_node)
+    ntp_start = marker_by_prefix["# Claude SCCR2685 NTP 兜底 (使用节点:"]
+    tonghuashun_start = marker_by_prefix["# Tonghuashun (DIRECT)"]
+    ntp_block_rules = [
+        line.strip()
+        for line in rule_block[ntp_start:tonghuashun_start].splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if ntp_block_rules != [ntp_rule] or active_rules.count(ntp_rule) != 1:
+        raise RuleValidationError(
+            f"{source_name}: Claude SCCR2685 NTP 兜底缺失、重复或位置异常"
+        )
     return len(active_rules)
 
 
@@ -1269,7 +1488,8 @@ def build_config(
 
     print(f"[{now}] 开始构建规则...")
 
-    # 1. 构建硬编码极高优先级 (Apple、同花顺与懂球帝广告拦截)
+    # 1. 构建硬编码高优先级规则。Claude 域名必须是 [Rule] 的首批有效规则；
+    # Apple 仍放在全局 NTP 兜底之前，避免 time.apple.com 被端口规则抢走。
     apple_rules_str = f"# Apple & iCloud Services (DIRECT) - {now.strftime('%Y-%m-%d')}\n"
     apple_rules_str += "".join([f"DOMAIN-SUFFIX,{d},DIRECT\n" for d in apple_domains]) + "\n"
     apple_rules_str += "".join([f"DOMAIN-KEYWORD,{d},DIRECT\n" for d in apple_keywords]) + "\n"
@@ -1296,15 +1516,30 @@ def build_config(
         openai_rules_str += f"{attach_policy(line, openai_node)}\n"
     openai_rules_str += "\n"
 
+    claude_groups = build_claude_rule_groups()
+    claude_rules_str = f"# Claude SCCR2685 全家桶 (使用节点: {claude_node})\n"
+    claude_rules_str += "# SCCR2685 主规则（域名与关键词优先）\n"
+    for line in claude_groups["primary_priority"]:
+        claude_rules_str += f"{attach_policy(line, claude_node)}\n"
+    claude_rules_str += "# 原有 Claude 兼容补充（SCCR2685 未逐字包含）\n"
+    for line in claude_groups["legacy_priority"]:
+        claude_rules_str += f"{attach_policy(line, claude_node)}\n"
+    claude_rules_str += "# Anthropic 官方条件补充（npm/bun 安装共享 registry）\n"
+    for line in claude_groups["official_priority"]:
+        claude_rules_str += f"{attach_policy(line, claude_node)}\n"
+    claude_rules_str += "# SCCR2685 Anthropic 自有 IP / ASN 兜底\n"
+    for line in claude_groups["network"]:
+        claude_rules_str += f"{attach_policy(line, claude_node)}\n"
+    claude_rules_str += "\n"
+
+    claude_ntp_rules_str = f"# Claude SCCR2685 NTP 兜底 (使用节点: {claude_node})\n"
+    claude_ntp_rules_str += "# 全设备端口规则；置于 Apple 域名直连之后以保护 Apple NTP。\n"
+    for line in claude_groups["ntp"]:
+        claude_ntp_rules_str += f"{attach_policy(line, claude_node)}\n"
+    claude_ntp_rules_str += "\n"
+
     core_results, core_updates = fetch_sources_parallel(
         [
-            (
-                "claude",
-                claude_url,
-                cache_dir / "Claude.list",
-                "Claude",
-                validate_provider_content,
-            ),
             (
                 "johnshall",
                 johnshall_url,
@@ -1315,53 +1550,6 @@ def build_config(
         ]
     )
     pending_cache_updates.extend(core_updates)
-
-    # ================= Claude 无死角分流逻辑 =================
-    is_cl_online, cl_content = core_results["claude"]
-    if cl_content is None:
-        raise RuleValidationError("Claude 在线内容和本地缓存都不可用，保留现有配置")
-
-    claude_rules_str = f"# Claude 全家桶 (使用节点: {claude_node})\n"
-
-    # A. Claude 精确探针域名，放在更宽泛规则之前，避免被后续兜底规则吞掉。
-    claude_exact_domains = [
-        "api64.ipify.org",
-    ]
-    claude_rules_str += "".join([f"DOMAIN,{d},{claude_node}\n" for d in claude_exact_domains])
-
-    # B. 核心 UA 匹配 (针对 CLI 和 App)
-    claude_rules_str += f"USER-AGENT,Claude*,{claude_node}\n"
-    claude_rules_str += f"USER-AGENT,anthropic*,{claude_node}\n"
-
-    # C. 核心域名后缀 (Artifacts/Cowork 必备 + 新增极致防封补丁)
-    claude_manual_domains = [
-        # --- 原有保留 ---
-        "claude.ai", "anthropic.com", "claudeusercontent.com", "statsigapi.net",
-        # --- 新增：人机验证与前端静态依赖 (防卡加载) ---
-        "hcaptcha.com", "recaptcha.net", "gstatic.com", "cloudflare-static.com",
-        # --- 新增：高危遥测与后台统计 (防封核心) ---
-        "statsig.com", "sentry.io", "segment.io", "datadoghq.com", "browser-intake-datadoghq.com",
-        # --- 新增：支付与主控域名 ---
-        "unlimited-pay.anthropic.com",
-    ]
-    claude_rules_str += "".join([f"DOMAIN-SUFFIX,{d},{claude_node}\n" for d in claude_manual_domains])
-
-    # D. 新增精确匹配逻辑 (缩小遥测域名的误伤范围)
-    claude_rules_str += f"DOMAIN,statsigapi.net,{claude_node}\n"
-
-    # E. 原有及新增的关键字匹配
-    claude_rules_str += f"DOMAIN-KEYWORD,claude,{claude_node}\n"
-    claude_rules_str += f"DOMAIN-KEYWORD,anthropic,{claude_node}\n"
-
-    # F. 内联已经过构建时校验的上游快照，避免客户端运行时重新下载绕过校验。
-    claude_source_name = "Claude" if is_cl_online else "Claude 本地缓存"
-    claude_mode = "在线校验快照" if is_cl_online else "本地缓存快照"
-    claude_rules_str += f"# Claude 上游补充规则 ({claude_mode}内联)\n"
-    for line in provider_rule_lines(cl_content, claude_source_name):
-        claude_rules_str += f"{attach_policy(line, claude_node)}\n"
-    print(f"-> Claude 使用{claude_mode}内联，运行时不再下载 RULE-SET")
-    claude_rules_str += "\n"
-    # =================================================================
 
     # 3. 处理 Johnshall 基础与去广告规则
     _, j_content = core_results["johnshall"]
@@ -1437,13 +1625,15 @@ def build_config(
         for line in provider_rule_lines(dom_content, source_name):
             domestic_rules_str += f"{attach_policy(line, 'DIRECT')}\n"
 
-    # 5. 核心严格拼装顺序 (Claude 规则紧跟 OpenAI)
+    # 5. 核心严格拼装顺序。SCCR2685 域名/IP 位于所有通用规则之前；
+    # 全局 NTP 在 Apple 域名后，避免改变受保护的 Apple 时间服务策略。
     final_rules = (
-        apple_rules_str
+        claude_rules_str
+        + apple_rules_str
+        + claude_ntp_rules_str
         + tonghuashun_rules_str
         + dongqiudi_rules_str
         + openai_rules_str
-        + claude_rules_str
         + copilot_rules_str
         + "\n# --- Johnshall 去广告与基础代理区块 ---\n"
         + j_rules_clean

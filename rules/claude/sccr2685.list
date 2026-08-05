@@ -1,0 +1,47 @@
+# BC Claude SCCR2685 primary provider
+# Source: https://ip.net.coffee/claude/site.html
+# Audited: 2026-08-05
+#
+# This is the 39-rule mergeable subset of Shadowrocket-Claude-Code-NEW.conf.
+# Its standalone FINAL,DIRECT is intentionally excluded because the combined
+# configuration must keep its existing single FINAL policy.
+
+DOMAIN,api.anthropic.com
+DOMAIN,cdn.anthropic.com
+DOMAIN,mcp.anthropic.com
+DOMAIN,console.anthropic.com
+DOMAIN,workbench.anthropic.com
+DOMAIN,platform.claude.com
+DOMAIN,mcp-proxy.anthropic.com
+DOMAIN,downloads.claude.ai
+DOMAIN,bridge.claudeusercontent.com
+DOMAIN,code.claude.com
+DOMAIN,assets-proxy.anthropic.com
+DOMAIN-SUFFIX,anthropic.com
+DOMAIN-SUFFIX,claude.ai
+DOMAIN-SUFFIX,claude.com
+DOMAIN-SUFFIX,clau.de
+DOMAIN-SUFFIX,claudemcpclient.com
+DOMAIN-SUFFIX,claudemcpcontent.com
+DOMAIN-SUFFIX,claudeusercontent.com
+DOMAIN,storage.googleapis.com
+DOMAIN,raw.githubusercontent.com
+DOMAIN,http-intake.logs.us5.datadoghq.com
+DOMAIN,formulae.brew.sh
+DOMAIN,anthropic.com.cdn.cloudflare.net
+DOMAIN,servd-anthropic-website.b-cdn.net
+DOMAIN,anthropic.auth0.com
+DOMAIN,anthropic-com.ghost.io
+DOMAIN,browser-intake-us5-datadoghq.com
+DOMAIN-SUFFIX,sentry.io
+DOMAIN-SUFFIX,statsigapi.net
+DOMAIN-SUFFIX,intercom.io
+DOMAIN-SUFFIX,intercomcdn.com
+DOMAIN,cdn.usefathom.com
+DOMAIN-KEYWORD,datadog
+DOMAIN-KEYWORD,sentry
+DOMAIN-KEYWORD,sift
+IP-CIDR,160.79.104.0/21,no-resolve
+IP-CIDR6,2607:6bc0::/32,no-resolve
+IP-ASN,399358,no-resolve
+DST-PORT,123

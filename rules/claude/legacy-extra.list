@@ -1,0 +1,21 @@
+# BC Claude pre-SCCR2685 compatibility supplement
+#
+# These are the 15 unique rules present in the previous generated Claude block
+# but absent as exact rules from SCCR2685. Semantic overlap is retained on
+# purpose so future edits cannot silently shrink the former compatibility set.
+
+DOMAIN,api64.ipify.org
+USER-AGENT,Claude*
+USER-AGENT,anthropic*
+DOMAIN-SUFFIX,hcaptcha.com
+DOMAIN-SUFFIX,recaptcha.net
+DOMAIN-SUFFIX,gstatic.com
+DOMAIN-SUFFIX,cloudflare-static.com
+DOMAIN-SUFFIX,statsig.com
+DOMAIN-SUFFIX,segment.io
+DOMAIN-SUFFIX,datadoghq.com
+DOMAIN-SUFFIX,browser-intake-datadoghq.com
+DOMAIN-SUFFIX,unlimited-pay.anthropic.com
+DOMAIN,statsigapi.net
+DOMAIN-KEYWORD,claude
+DOMAIN-KEYWORD,anthropic
