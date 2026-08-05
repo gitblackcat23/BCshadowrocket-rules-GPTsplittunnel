@@ -1,6 +1,12 @@
 name: 自动更新规则并同步缓存
 
 on:
+  # 新版生成器进入 main 后，立即用该版本重新生成并提交正式配置。
+  push:
+    branches:
+      - main
+    paths:
+      - 'update_rules.py'
   # 每天北京时间 08:08 自动运行（UTC 00:08）
   schedule:
     - cron: '8 0 * * *'

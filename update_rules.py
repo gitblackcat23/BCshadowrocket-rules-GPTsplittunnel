@@ -1491,6 +1491,11 @@ def semantic_config_fingerprint(content):
     return hashlib.sha256("\n".join(active_lines).encode("utf-8")).hexdigest()
 
 
+def generator_source_sha256():
+    """Return a deterministic provenance fingerprint for the active generator."""
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
 # ================= 核心网络与降级函数 =================
 def _validate_download_url(url, source_name):
     parsed = urlparse(url)
@@ -2073,7 +2078,11 @@ def build_config(
         + f"\n\n# 兜底规则\nFINAL,{default_node}\n"
     )
 
-    new_content = before_rules + final_rules + after_rules
+    generator_metadata = (
+        "# BC Shadowrocket generated configuration\n"
+        f"# Generator: update_rules.py sha256={generator_source_sha256()}\n"
+    )
+    new_content = generator_metadata + before_rules + final_rules + after_rules
     validate_generated_config(new_content)
 
     # 缓存、审计产物、可选备份和正式配置一次性发布；任一替换失败即回滚全部。

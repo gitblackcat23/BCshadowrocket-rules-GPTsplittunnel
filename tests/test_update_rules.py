@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 import re
 import tempfile
@@ -784,6 +785,16 @@ class RuleGeneratorTests(unittest.TestCase):
                 )
 
             self.assertEqual(output_path.read_text(encoding="utf-8"), generated)
+            expected_generator_digest = hashlib.sha256(
+                Path(rules.__file__).read_bytes()
+            ).hexdigest()
+            self.assertTrue(
+                generated.startswith(
+                    "# BC Shadowrocket generated configuration\n"
+                    "# Generator: update_rules.py "
+                    f"sha256={expected_generator_digest}\n"
+                )
+            )
             expected_backup = backup_dir / "custom_rules_20260715_123456.conf"
             self.assertEqual(expected_backup.read_text(encoding="utf-8"), generated)
             self.assertEqual(
@@ -1464,6 +1475,10 @@ class RuleGeneratorTests(unittest.TestCase):
         workflow = workflow_path.read_text(encoding="utf-8")
 
         self.assertIn("cron: '8 0 * * *'", workflow)
+        self.assertRegex(
+            workflow,
+            r"push:\s+branches:\s+- main\s+paths:\s+- 'update_rules\.py'",
+        )
         generate_command = "python update_rules.py --no-backup"
         validate_command = (
             "python update_rules.py --validate-config custom_shadowrocket_rules.conf"
