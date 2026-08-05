@@ -3,6 +3,7 @@ import concurrent.futures
 import datetime
 import hashlib
 import ipaddress
+import json
 import os
 import re
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-
+from publicsuffixlist import PublicSuffixList
 
 # ================= 基础配置 =================
 default_node = "V3(vless+vision+reality)"
@@ -59,10 +60,10 @@ MIN_GENERATED_RULES = 10_000
 
 # Audited active-rule counts for known-good sources. Existing source counts were
 # established at commit 85ef191; the two dynamic OpenAI source counts were reviewed on
-# 2026-07-16. Crossing the 50%-200% envelope requires an explicit baseline review.
+# 2026-08-05. Crossing the 50%-200% envelope requires an explicit baseline review.
 SOURCE_BASELINE_RULE_COUNTS = {
-    "OpenAI VPSDance": 45,
-    "OpenAI v2fly": 23,
+    "OpenAI blackmatrix7": 35,
+    "OpenAI MetaCubeX": 23,
     "WeChat": 33,
     "WeType": 1,
     "Zhihu": 7,
@@ -123,19 +124,35 @@ JOHNSHALL_RULE_TYPES = PROVIDER_RULE_TYPES | {
 }
 
 OPENAI_MIN_MERGED_RULES = 65
-OPENAI_V2FLY_REGEX_RULES = {
+OPENAI_METACUBEX_REGEX_RULES = {
     r"^chatgpt-async-webps-prod-\S+-\d+\.webpubsub\.azure\.com$": (
         "DOMAIN-KEYWORD,chatgpt-async-webps-prod-"
     ),
 }
-OPENAI_APPROVED_VPS_SENSITIVE_RULES = {
-    "DOMAIN-KEYWORD,chatgpt-async-webps-prod",
+OPENAI_APPROVED_BLACKMATRIX_SENSITIVE_RULES = {
     "DOMAIN-KEYWORD,openai",
-    "IP-CIDR,199.47.142.0/23,no-resolve",
     "IP-CIDR,24.199.123.28/32,no-resolve",
     "IP-CIDR,64.23.132.171/32,no-resolve",
-    "IP-CIDR6,2604:f20::/32,no-resolve",
-    "IP-ASN,401518,no-resolve",
+    # The upstream list currently includes shared Vultr ASN 20473. It is safe to
+    # accept into the validated raw snapshot only because merge_openai_rule_lines()
+    # always removes it before policy attachment.
+    "IP-ASN,20473,no-resolve",
+}
+OPENAI_APPROVED_METACUBEX_KEYWORD_RULES = {
+    "DOMAIN-KEYWORD,openai",
+}
+PUBLIC_SUFFIX_LIST = PublicSuffixList()
+OPENAI_APPROVED_PUBLIC_SUFFIX_RULES = {
+    # The PSL private section records these entries under OpenAI. Routing their
+    # complete suffixes is intentional and both are already in the fixed baseline.
+    "DOMAIN-SUFFIX,chatgpt.site",
+    "DOMAIN-SUFFIX,oaiusercontent.com",
+}
+DOMESTIC_KEYWORD_ASSOCIATED_SUFFIXES = {
+    # The upstream Weibo provider expresses most service roots explicitly, but its
+    # broad `weibo` keyword also owns active hosts below sina.com (for example
+    # weibo.sina.com). Keep that relationship explicit for cross-policy auditing.
+    ("Weibo", "weibo"): ("sina.com",),
 }
 OPENAI_REQUIRED_RULES = {
     "DOMAIN-SUFFIX,chat.com",
@@ -148,6 +165,7 @@ OPENAI_REQUIRED_RULES = {
     "DOMAIN-SUFFIX,openai.com",
     "DOMAIN-SUFFIX,sora.com",
     "DOMAIN-SUFFIX,turn.livekit.cloud",
+    "DOMAIN,openai.qualtrics.com",
     "DOMAIN,ws.chatgpt.com",
     "IP-CIDR,199.47.142.0/23,no-resolve",
     "IP-CIDR6,2604:f20::/32,no-resolve",
@@ -254,8 +272,8 @@ domestic_lists = {
     "115": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/115/115.list",
 }
 
-openai_vps_url = "https://raw.githubusercontent.com/VPSDance/ai-proxy-rules/main/rules/shadowrocket/openai.list"
-openai_v2fly_url = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/openai"
+openai_blackmatrix_url = "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/OpenAI/OpenAI.list"
+openai_metacubex_url = "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/openai.json"
 johnshall_url = "https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf"
 
 
@@ -523,8 +541,10 @@ def validate_provider_content(
     _check_rule_count_ratio(
         source_name,
         len(lines),
-        baseline_count if baseline_count is not None else audited_baseline,
+        audited_baseline,
     )
+    if baseline_count is not None and baseline_count != audited_baseline:
+        _check_rule_count_ratio(source_name, len(lines), baseline_count)
     return len(lines)
 
 
@@ -559,22 +579,294 @@ def normalize_provider_rule(
     return ",".join(normalized)
 
 
-def validate_vps_openai_content(content, source_name, baseline_count=None, content_type=""):
+def _domain_suffix_scopes_intersect(first, second):
+    return (
+        first == second
+        or first.endswith(f".{second}")
+        or second.endswith(f".{first}")
+    )
+
+
+def _dynamic_domain_rule_intersects(
+    dynamic_rule_type,
+    dynamic_target,
+    protected_rule_type,
+    protected_target,
+):
+    if protected_rule_type == "DOMAIN":
+        if dynamic_rule_type == "DOMAIN":
+            return dynamic_target == protected_target
+        return (
+            dynamic_target == protected_target
+            or protected_target.endswith(f".{dynamic_target}")
+        )
+    if protected_rule_type == "DOMAIN-SUFFIX":
+        if dynamic_rule_type == "DOMAIN":
+            return (
+                dynamic_target == protected_target
+                or dynamic_target.endswith(f".{protected_target}")
+            )
+        return _domain_suffix_scopes_intersect(
+            dynamic_target,
+            protected_target,
+        )
+    return protected_target in dynamic_target
+
+
+def _validate_openai_dynamic_domain_scope(lines, source_name):
+    protected_suffixes = [
+        (domain.lower().rstrip("."), "Apple/iCloud DIRECT")
+        for domain in apple_domains
+    ] + [
+        (domain.lower().rstrip("."), "Tonghuashun DIRECT")
+        for domain in tonghuashun_domains
+    ]
+    dongqiudi_keyword = DONGQIUDI_AD_RULE.split(",", 2)[1].lower()
+    protected_keywords = [
+        (keyword.lower(), "Apple/iCloud DIRECT")
+        for keyword in apple_keywords
+    ] + [
+        (dongqiudi_keyword, "Dongqiudi REJECT")
+    ]
+    for line in lines:
+        rule_type, target = line.split(",", 2)[:2]
+        if rule_type not in {"DOMAIN", "DOMAIN-SUFFIX"}:
+            continue
+
+        labels = target.split(".")
+        if len(labels) < 2:
+            raise RuleValidationError(
+                f"{source_name}: 动态域名范围过宽或不是公网域名 {line!r}"
+            )
+        if target.startswith("*."):
+            raise RuleValidationError(
+                f"{source_name}: OpenAI 动态域名禁止通配符目标 {line!r}"
+            )
+        if (
+            rule_type == "DOMAIN-SUFFIX"
+            and PUBLIC_SUFFIX_LIST.is_public(target)
+            and line not in OPENAI_APPROVED_PUBLIC_SUFFIX_RULES
+        ):
+            raise RuleValidationError(
+                f"{source_name}: 禁止公共后缀级 OpenAI 分流 {line!r}"
+            )
+
+        for protected_suffix, policy_name in protected_suffixes:
+            if rule_type == "DOMAIN":
+                conflicts = (
+                    target == protected_suffix
+                    or target.endswith(f".{protected_suffix}")
+                )
+            else:
+                conflicts = _domain_suffix_scopes_intersect(
+                    target,
+                    protected_suffix,
+                )
+            if conflicts:
+                raise RuleValidationError(
+                    f"{source_name}: 动态规则 {line!r} 与受保护的 "
+                    f"{policy_name} 范围冲突"
+                )
+
+        for protected_keyword, policy_name in protected_keywords:
+            if protected_keyword in target or (
+                rule_type == "DOMAIN-SUFFIX"
+                and protected_keyword.endswith(f".{target}")
+            ):
+                raise RuleValidationError(
+                    f"{source_name}: 动态规则 {line!r} 与受保护的 "
+                    f"{policy_name} 关键词冲突"
+                )
+
+
+def _domestic_direct_domain_scopes(domestic_results):
+    scopes = []
+    for source_name in domestic_lists:
+        try:
+            is_online, content = domestic_results[source_name]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuleValidationError(
+                f"无法审计本次 {source_name} DIRECT 规则"
+            ) from exc
+        if content is None:
+            raise RuleValidationError(
+                f"无法审计本次 {source_name} DIRECT 规则: 内容不可用"
+            )
+
+        snapshot_name = source_name if is_online else f"{source_name} 本地缓存"
+        for line in provider_rule_lines(content, snapshot_name):
+            normalized = normalize_provider_rule(line, snapshot_name)
+            rule_type, target = normalized.split(",", 2)[:2]
+            if rule_type in {"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"}:
+                scopes.append(
+                    (rule_type, target, f"{snapshot_name} DIRECT")
+                )
+            if rule_type == "DOMAIN-KEYWORD":
+                for associated_suffix in DOMESTIC_KEYWORD_ASSOCIATED_SUFFIXES.get(
+                    (source_name, target),
+                    (),
+                ):
+                    scopes.append(
+                        (
+                            "DOMAIN-SUFFIX",
+                            associated_suffix,
+                            f"{snapshot_name} DIRECT 关键词 {target!r} 的关联域名",
+                        )
+                    )
+    return scopes
+
+
+def _johnshall_protected_domain_scopes(content):
+    rule_match, next_section, _ = _johnshall_rule_block(content, "Johnshall")
+    rule_body_start = _section_body_start(content, rule_match)
+    scopes = []
+    for line_number, raw_line in enumerate(
+        content[rule_body_start:next_section.start()].splitlines(),
+        start=1,
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = validate_routed_rule(
+            line,
+            "Johnshall [Rule]",
+            line_number,
+            allow_match=True,
+        )
+        rule_type = parts[0].upper()
+        if rule_type not in {"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"}:
+            continue
+        policy = (
+            re.split(r"\s+#", parts[2], maxsplit=1)[0].strip().lower()
+            if len(parts) >= 3
+            else ""
+        )
+        if policy != "direct" and not policy.startswith("reject"):
+            continue
+        target = parts[1].lower().rstrip(".")
+        scopes.append((rule_type, target, f"Johnshall {policy.upper()}"))
+    return scopes
+
+
+def _validate_openai_rules_against_scopes(openai_rules, protected_scopes):
+    for line in openai_rules:
+        normalized = normalize_provider_rule(line, "OpenAI 动态新增规则")
+        rule_type, target = normalized.split(",", 2)[:2]
+        if rule_type not in {"DOMAIN", "DOMAIN-SUFFIX"}:
+            continue
+        for protected_rule_type, protected_target, policy_name in protected_scopes:
+            if _dynamic_domain_rule_intersects(
+                rule_type,
+                target,
+                protected_rule_type,
+                protected_target,
+            ):
+                raise RuleValidationError(
+                    f"OpenAI 规则 {normalized!r} 与本次 {policy_name} 规则冲突"
+                )
+
+
+def validate_openai_domestic_policy_compatibility(openai_rules, domestic_results):
+    """Reject intersections with this build's selected domestic snapshots."""
+    _validate_openai_rules_against_scopes(
+        openai_rules,
+        _domestic_direct_domain_scopes(domestic_results),
+    )
+
+
+def _openai_domain_rule_is_covered(candidate, approved_rules):
+    candidate_type, candidate_target = candidate.split(",", 2)[:2]
+    if candidate_type not in {"DOMAIN", "DOMAIN-SUFFIX"}:
+        return True
+
+    for approved in approved_rules:
+        approved_type, approved_target = approved.split(",", 2)[:2]
+        if approved_type == "DOMAIN":
+            if candidate_type == "DOMAIN" and candidate_target == approved_target:
+                return True
+        elif approved_type == "DOMAIN-SUFFIX":
+            if candidate_target == approved_target or candidate_target.endswith(
+                f".{approved_target}"
+            ):
+                return True
+        elif approved_type == "DOMAIN-KEYWORD" and approved_target in candidate_target:
+            return True
+    return False
+
+
+def _new_dynamic_openai_domain_rules(source_rules, approved_rules):
+    normalized_approved = {
+        normalize_provider_rule(line, "OpenAI 已审核固定规则")
+        for line in approved_rules
+    }
+    additions = []
+    for line in source_rules:
+        normalized = normalize_provider_rule(line, "OpenAI 动态来源")
+        if not _openai_domain_rule_is_covered(normalized, normalized_approved):
+            additions.append(normalized)
+    return additions
+
+
+def _contextual_openai_validator(
+    base_validator,
+    rule_parser,
+    approved_rules,
+    protected_scopes,
+):
+    def validate(content, source_name, baseline_count=None, content_type=""):
+        count = base_validator(
+            content,
+            source_name,
+            baseline_count=baseline_count,
+            content_type=content_type,
+        )
+        source_rules = rule_parser(content, source_name)
+        additions = _new_dynamic_openai_domain_rules(
+            source_rules,
+            approved_rules,
+        )
+        _validate_openai_rules_against_scopes(additions, protected_scopes)
+        return count
+
+    return validate
+
+
+def blackmatrix_openai_rule_lines(content, source_name="OpenAI blackmatrix7"):
+    return [
+        normalize_provider_rule(line, source_name)
+        for line in provider_rule_lines(content, source_name)
+    ]
+
+
+def validate_blackmatrix_openai_content(
+    content,
+    source_name,
+    baseline_count=None,
+    content_type="",
+):
     count = validate_provider_content(
         content,
         source_name,
         baseline_count=baseline_count,
         content_type=content_type,
     )
-    sensitive_types = {"DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "IP-ASN"}
-    for line in provider_rule_lines(content, source_name):
-        normalized = normalize_provider_rule(line, source_name)
+    sensitive_types = {
+        "DOMAIN-KEYWORD",
+        "USER-AGENT",
+        "IP-CIDR",
+        "IP-CIDR6",
+        "IP-ASN",
+    }
+    normalized_lines = blackmatrix_openai_rule_lines(content, source_name)
+    if len(normalized_lines) != len(set(normalized_lines)):
+        raise RuleValidationError(f"{source_name}: 规范化后含文本重复项")
+    _validate_openai_dynamic_domain_scope(normalized_lines, source_name)
+
+    for normalized in normalized_lines:
         rule_type = normalized.split(",", 1)[0]
-        if normalized.startswith("IP-ASN,20473,") or normalized == "IP-ASN,20473":
-            raise RuleValidationError(f"{source_name}: 禁止重新引入共享托管 ASN 20473")
         if (
             rule_type in sensitive_types
-            and normalized not in OPENAI_APPROVED_VPS_SENSITIVE_RULES
+            and normalized not in OPENAI_APPROVED_BLACKMATRIX_SENSITIVE_RULES
         ):
             raise RuleValidationError(
                 f"{source_name}: 出现未经审核的高影响规则 {normalized!r}"
@@ -582,56 +874,158 @@ def validate_vps_openai_content(content, source_name, baseline_count=None, conte
     return count
 
 
-def v2fly_openai_rule_lines(content, source_name="OpenAI v2fly"):
+def _load_json_without_duplicate_keys(content, source_name):
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise RuleValidationError(f"{source_name}: JSON 含重复键 {key!r}")
+            result[key] = value
+        return result
+
+    def reject_nonstandard_constant(value):
+        raise RuleValidationError(f"{source_name}: JSON 含非标准常量 {value!r}")
+
+    try:
+        return json.loads(
+            content,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_nonstandard_constant,
+        )
+    except RuleValidationError:
+        raise
+    except json.JSONDecodeError as exc:
+        raise RuleValidationError(
+            f"{source_name}: JSON 格式不合法（第 {exc.lineno} 行第 {exc.colno} 列）"
+        ) from exc
+    except (RecursionError, ValueError) as exc:
+        raise RuleValidationError(f"{source_name}: JSON 无法安全解析") from exc
+
+
+def _metacubex_string_values(value, field_name, source_name, rule_number):
+    location = f"{source_name}: rules[{rule_number}].{field_name}"
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        raise RuleValidationError(f"{location}: 必须是字符串或字符串数组")
+
+    if not values or any(not isinstance(item, str) for item in values):
+        raise RuleValidationError(f"{location}: 必须是非空字符串或字符串数组")
+    return values
+
+
+def metacubex_openai_rule_lines(content, source_name="OpenAI MetaCubeX"):
+    _reject_empty_or_html(content, source_name)
+    document = _load_json_without_duplicate_keys(content, source_name)
+    if not isinstance(document, dict):
+        raise RuleValidationError(f"{source_name}: JSON 顶层必须是对象")
+
+    required_fields = {"version", "rules"}
+    actual_fields = set(document)
+    if actual_fields != required_fields:
+        missing = sorted(required_fields - actual_fields)
+        unexpected = sorted(actual_fields - required_fields)
+        raise RuleValidationError(
+            f"{source_name}: JSON 顶层字段异常，缺少={missing}，未知={unexpected}"
+        )
+    if type(document["version"]) is not int or document["version"] != 2:
+        raise RuleValidationError(
+            f"{source_name}: 只接受 MetaCubeX geosite JSON version 2"
+        )
+    if not isinstance(document["rules"], list) or not document["rules"]:
+        raise RuleValidationError(f"{source_name}: rules 必须是非空数组")
+
+    field_mapping = (
+        ("domain", "DOMAIN"),
+        ("domain_suffix", "DOMAIN-SUFFIX"),
+        ("domain_keyword", "DOMAIN-KEYWORD"),
+    )
+    allowed_fields = {field_name for field_name, _ in field_mapping} | {
+        "domain_regex"
+    }
     lines = []
-    for line_number, raw_line in enumerate(content.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-
-        fields = line.split()
-        entry = fields[0]
-        attributes = fields[1:]
-        if any(not attribute.startswith("@") for attribute in attributes):
+    for rule_number, rule_group in enumerate(document["rules"]):
+        if not isinstance(rule_group, dict) or not rule_group:
             raise RuleValidationError(
-                f"{source_name}:{line_number}: v2fly 属性格式不合法"
+                f"{source_name}: rules[{rule_number}] 必须是非空对象"
+            )
+        unknown_fields = sorted(set(rule_group) - allowed_fields)
+        if unknown_fields:
+            raise RuleValidationError(
+                f"{source_name}: rules[{rule_number}] 含未审核字段 {unknown_fields}"
             )
 
-        if entry.startswith("full:"):
-            target = entry.removeprefix("full:")
-            rule = f"DOMAIN,{target}"
-        elif entry.startswith("regexp:"):
-            expression = entry.removeprefix("regexp:")
-            rule = OPENAI_V2FLY_REGEX_RULES.get(expression)
-            if rule is None:
-                raise RuleValidationError(
-                    f"{source_name}:{line_number}: 未审核的 v2fly 正则 {expression!r}"
+        for field_name, rule_type in field_mapping:
+            if field_name not in rule_group:
+                continue
+            values = _metacubex_string_values(
+                rule_group[field_name],
+                field_name,
+                source_name,
+                rule_number,
+            )
+            for value in values:
+                normalized = normalize_provider_rule(
+                    f"{rule_type},{value}",
+                    f"{source_name}: rules[{rule_number}].{field_name}",
                 )
-        elif ":" in entry:
-            directive = entry.split(":", 1)[0]
-            raise RuleValidationError(
-                f"{source_name}:{line_number}: 不支持的 v2fly 指令 {directive!r}"
-            )
-        else:
-            rule = f"DOMAIN-SUFFIX,{entry}"
+                if (
+                    rule_type == "DOMAIN-KEYWORD"
+                    and normalized not in OPENAI_APPROVED_METACUBEX_KEYWORD_RULES
+                ):
+                    raise RuleValidationError(
+                        f"{source_name}: 出现未经审核的高影响规则 {normalized!r}"
+                    )
+                lines.append(normalized)
 
-        lines.append(normalize_provider_rule(rule, f"{source_name}:{line_number}"))
+        if "domain_regex" in rule_group:
+            expressions = _metacubex_string_values(
+                rule_group["domain_regex"],
+                "domain_regex",
+                source_name,
+                rule_number,
+            )
+            for expression in expressions:
+                rule = OPENAI_METACUBEX_REGEX_RULES.get(expression)
+                if rule is None:
+                    raise RuleValidationError(
+                        f"{source_name}: rules[{rule_number}] 含未审核正则 "
+                        f"{expression!r}"
+                    )
+                lines.append(
+                    normalize_provider_rule(
+                        rule,
+                        f"{source_name}: rules[{rule_number}].domain_regex",
+                    )
+                )
 
     if not lines:
         raise RuleValidationError(f"{source_name}: 没有有效规则")
+    if len(lines) != len(set(lines)):
+        raise RuleValidationError(f"{source_name}: 转换后含文本重复项")
+    _validate_openai_dynamic_domain_scope(lines, source_name)
     return lines
 
 
-def validate_v2fly_openai_content(content, source_name, baseline_count=None, content_type=""):
+def validate_metacubex_openai_content(
+    content,
+    source_name,
+    baseline_count=None,
+    content_type="",
+):
     _reject_empty_or_html(content, source_name, content_type)
-    lines = v2fly_openai_rule_lines(content, source_name)
+    lines = metacubex_openai_rule_lines(content, source_name)
     canonical_source_name = source_name.removesuffix(" 本地缓存")
     audited_baseline = SOURCE_BASELINE_RULE_COUNTS.get(canonical_source_name)
     _check_rule_count_ratio(
         source_name,
         len(lines),
-        baseline_count if baseline_count is not None else audited_baseline,
+        audited_baseline,
     )
+    if baseline_count is not None and baseline_count != audited_baseline:
+        _check_rule_count_ratio(source_name, len(lines), baseline_count)
     return len(lines)
 
 
@@ -804,10 +1198,12 @@ def validate_merged_openai_rules(lines, baseline_rules):
     return len(lines)
 
 
-def render_openai_provider(lines):
+def render_openai_provider(lines, generated_on):
     return (
         "# BC OpenAI merged provider\n"
-        "# Sources: conservative baseline + official domain overlay + VPSDance + v2fly\n"
+        "# Sources: conservative baseline + official domain overlay + "
+        "blackmatrix7 + MetaCubeX\n"
+        f"# Generated: {generated_on.isoformat()}\n"
         f"# Rule count: {len(lines)}\n\n"
         + "\n".join(lines)
         + "\n"
@@ -1393,7 +1789,14 @@ def validate_generated_config(content, source_name="生成配置", min_rule_coun
     return len(active_rules)
 
 
-def build_openai_provider(cache_dir, pending_cache_updates, generated_path):
+def build_openai_provider(
+    cache_dir,
+    pending_cache_updates,
+    generated_path,
+    generated_on,
+    johnshall_content,
+    domestic_results,
+):
     baseline_rules = local_openai_rule_lines(
         OPENAI_COMPATIBILITY_PATH,
         "OpenAI 固定兼容底座",
@@ -1402,63 +1805,82 @@ def build_openai_provider(cache_dir, pending_cache_updates, generated_path):
         OPENAI_OFFICIAL_PATH,
         "OpenAI 官方兼容层",
     )
+    approved_rules = merge_openai_rule_lines(baseline_rules, official_rules)
+    domestic_scopes = _domestic_direct_domain_scopes(domestic_results)
+    # Fixed rules represent the approved pre-migration behavior and currently have
+    # no domestic DIRECT intersections. Dynamic additions must also preserve the
+    # current Johnshall DIRECT/Reject policies.
+    _validate_openai_rules_against_scopes(approved_rules, domestic_scopes)
+    protected_scopes = domestic_scopes + _johnshall_protected_domain_scopes(
+        johnshall_content
+    )
+    blackmatrix_validator = _contextual_openai_validator(
+        validate_blackmatrix_openai_content,
+        blackmatrix_openai_rule_lines,
+        approved_rules,
+        protected_scopes,
+    )
+    metacubex_validator = _contextual_openai_validator(
+        validate_metacubex_openai_content,
+        metacubex_openai_rule_lines,
+        approved_rules,
+        protected_scopes,
+    )
 
     source_results, source_updates = fetch_sources_parallel(
         [
             (
-                "vps",
-                openai_vps_url,
-                cache_dir / "OpenAI_VPSDance.list",
-                "OpenAI VPSDance",
-                validate_vps_openai_content,
+                "blackmatrix",
+                openai_blackmatrix_url,
+                cache_dir / "OpenAI_blackmatrix7.list",
+                "OpenAI blackmatrix7",
+                blackmatrix_validator,
             ),
             (
-                "v2fly",
-                openai_v2fly_url,
-                cache_dir / "OpenAI_v2fly.txt",
-                "OpenAI v2fly",
-                validate_v2fly_openai_content,
+                "metacubex",
+                openai_metacubex_url,
+                cache_dir / "OpenAI_MetaCubeX.json",
+                "OpenAI MetaCubeX",
+                metacubex_validator,
             ),
         ]
     )
     pending_cache_updates.extend(source_updates)
 
-    vps_online, vps_content = source_results["vps"]
-    if vps_content is None:
-        raise RuleValidationError("OpenAI VPSDance 在线内容和本地缓存都不可用")
-    vps_rules = [
-        normalize_provider_rule(line, "OpenAI VPSDance")
-        for line in provider_rule_lines(vps_content, "OpenAI VPSDance")
-    ]
+    blackmatrix_online, blackmatrix_content = source_results["blackmatrix"]
+    if blackmatrix_content is None:
+        raise RuleValidationError("OpenAI blackmatrix7 在线内容和本地缓存都不可用")
+    blackmatrix_rules = blackmatrix_openai_rule_lines(blackmatrix_content)
 
-    v2fly_online, v2fly_content = source_results["v2fly"]
-    if v2fly_content is None:
-        raise RuleValidationError("OpenAI v2fly 在线内容和本地缓存都不可用")
-    v2fly_rules = v2fly_openai_rule_lines(v2fly_content)
+    metacubex_online, metacubex_content = source_results["metacubex"]
+    if metacubex_content is None:
+        raise RuleValidationError("OpenAI MetaCubeX 在线内容和本地缓存都不可用")
+    metacubex_rules = metacubex_openai_rule_lines(metacubex_content)
 
     merged_rules = merge_openai_rule_lines(
         baseline_rules,
         official_rules,
-        vps_rules,
-        v2fly_rules,
+        blackmatrix_rules,
+        metacubex_rules,
     )
     validate_merged_openai_rules(merged_rules, baseline_rules)
-    rendered_provider = render_openai_provider(merged_rules)
+    rendered_provider = render_openai_provider(merged_rules, generated_on)
 
     pending_cache_updates.append((cache_dir / "OpenAI.list", rendered_provider))
     pending_cache_updates.append((Path(generated_path), rendered_provider))
 
-    digest = hashlib.sha256(rendered_provider.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(("\n".join(merged_rules) + "\n").encode("utf-8")).hexdigest()
     source_modes = ", ".join(
         [
-            f"VPSDance={'online' if vps_online else 'cache'}",
-            f"v2fly={'online' if v2fly_online else 'cache'}",
+            f"blackmatrix7={'online' if blackmatrix_online else 'cache'}",
+            f"MetaCubeX={'online' if metacubex_online else 'cache'}",
         ]
     )
     print(
         "-> OpenAI 合并完成: "
         f"baseline={len(baseline_rules)}, official={len(official_rules)}, "
-        f"VPSDance={len(vps_rules)}, v2fly={len(v2fly_rules)}, "
+        f"blackmatrix7={len(blackmatrix_rules)}, "
+        f"MetaCubeX={len(metacubex_rules)}, "
         f"merged={len(merged_rules)}, "
         f"sha256={digest}, {source_modes}"
     )
@@ -1505,16 +1927,6 @@ def build_config(
     # 2. 构建 Copilot & OpenAI 强制分流
     copilot_rules_str = f"# GitHub Copilot & Codex (使用节点: {openai_node})\n"
     copilot_rules_str += "".join([f"DOMAIN,{d},{openai_node}\n" for d in copilot_domains]) + "\n"
-
-    openai_rules_str = f"# OpenAI (使用节点: {openai_node})\n"
-    openai_rules = build_openai_provider(
-        cache_dir,
-        pending_cache_updates,
-        openai_generated_path,
-    )
-    for line in openai_rules:
-        openai_rules_str += f"{attach_policy(line, openai_node)}\n"
-    openai_rules_str += "\n"
 
     claude_groups = build_claude_rule_groups()
     claude_rules_str = f"# Claude SCCR2685 全家桶 (使用节点: {claude_node})\n"
@@ -1625,6 +2037,26 @@ def build_config(
         for line in provider_rule_lines(dom_content, source_name):
             domestic_rules_str += f"{attach_policy(line, 'DIRECT')}\n"
 
+    # OpenAI candidate validation now has the same-build Johnshall and domestic
+    # snapshots available. A conflicting online candidate falls back to its own LKG;
+    # a recovered online source can replace an older conflicting LKG without self-lock.
+    openai_rules_str = f"# OpenAI (使用节点: {openai_node})\n"
+    openai_rules = build_openai_provider(
+        cache_dir,
+        pending_cache_updates,
+        openai_generated_path,
+        now.date(),
+        j_content,
+        domestic_results,
+    )
+    for line in openai_rules:
+        openai_rules_str += f"{attach_policy(line, openai_node)}\n"
+    openai_rules_str += "\n"
+
+    # Final defense-in-depth check across the fully merged OpenAI rules and every
+    # selected domestic DIRECT snapshot.
+    validate_openai_domestic_policy_compatibility(openai_rules, domestic_results)
+
     # 5. 核心严格拼装顺序。SCCR2685 域名/IP 位于所有通用规则之前；
     # 全局 NTP 在 Apple 域名后，避免改变受保护的 Apple 时间服务策略。
     final_rules = (
@@ -1674,9 +2106,78 @@ def validate_config_file(path):
     return rule_count
 
 
+def validate_monitored_sources():
+    """Strictly validate live critical sources without reading or writing caches."""
+    specifications = [
+        (
+            "Johnshall",
+            johnshall_url,
+            validate_johnshall_content,
+        ),
+        (
+            "OpenAI blackmatrix7",
+            openai_blackmatrix_url,
+            validate_blackmatrix_openai_content,
+        ),
+        (
+            "OpenAI MetaCubeX",
+            openai_metacubex_url,
+            validate_metacubex_openai_content,
+        ),
+    ]
+
+    def validate_one(source_name, url, validator):
+        response_bytes, content_type = _download_source(url, source_name)
+        content = _decode_utf8(response_bytes, source_name)
+        return validator(
+            content,
+            source_name,
+            content_type=content_type,
+        )
+
+    worker_count = min(MAX_DOWNLOAD_WORKERS, len(specifications))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            source_name: executor.submit(
+                validate_one,
+                source_name,
+                url,
+                validator,
+            )
+            for source_name, url, validator in specifications
+        }
+
+        results = {}
+        failures = []
+        for source_name, _, _ in specifications:
+            try:
+                results[source_name] = futures[source_name].result()
+            except (OSError, requests.RequestException, RuleValidationError) as exc:
+                failures.append(f"{source_name}: {exc}")
+
+    if failures:
+        raise RuleValidationError(
+            "关键在线规则源严格校验失败：\n- " + "\n- ".join(failures)
+        )
+
+    for source_name, rule_count in results.items():
+        print(f"在线规则源校验通过: {source_name} ({rule_count} 条有效规则)")
+    return results
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="构建并校验 Shadowrocket 规则")
-    parser.add_argument("--validate-config", metavar="PATH", help="只读校验指定配置，不访问网络或写文件")
+    validation_modes = parser.add_mutually_exclusive_group()
+    validation_modes.add_argument(
+        "--validate-config",
+        metavar="PATH",
+        help="只读校验指定配置，不访问网络或写文件",
+    )
+    validation_modes.add_argument(
+        "--validate-monitored-sources",
+        action="store_true",
+        help="只读下载并严格校验关键在线源，不读写缓存",
+    )
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_PATH), help="生成配置输出路径")
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help="规则缓存目录")
     parser.add_argument("--backup-dir", default=str(DEFAULT_BACKUP_DIR), help="生成配置备份目录")
@@ -1698,6 +2199,8 @@ def main(argv=None):
     try:
         if args.validate_config:
             validate_config_file(args.validate_config)
+        elif args.validate_monitored_sources:
+            validate_monitored_sources()
         else:
             build_config(
                 output_path=args.output,

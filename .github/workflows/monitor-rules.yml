@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  contents: read
   issues: write
 
 env:
@@ -17,54 +18,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: 检出代码
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.10'
+          cache: pip
+
+      - name: 安装依赖
+        run: python -m pip install --requirement requirements.txt
+
       - name: 检查外部规则可用性
         id: check_rules
         shell: bash
         run: |
           set -uo pipefail
 
-          work_dir=$(mktemp -d)
-          trap 'rm -rf "$work_dir"' EXIT
+          message=$(python update_rules.py --validate-monitored-sources 2>&1)
+          status=$?
+          printf '%s\n' "$message"
 
-          fetch() {
-            local url=$1
-            local output=$2
-            curl --silent --show-error --location \
-              --retry 2 --retry-all-errors \
-              --connect-timeout 15 --max-time 45 \
-              --output "$output" --write-out '%{http_code}' "$url" || true
-          }
-
-          johnshall_code=$(fetch \
-            'https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_cnip_ad.conf' \
-            "$work_dir/johnshall.conf")
-          vpsdance_code=$(fetch \
-            'https://raw.githubusercontent.com/VPSDance/ai-proxy-rules/main/rules/shadowrocket/openai.list' \
-            "$work_dir/vpsdance.list")
-          v2fly_code=$(fetch \
-            'https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/openai' \
-            "$work_dir/v2fly-openai")
-
-          failures=()
-
-          if [ "$johnshall_code" != '200' ] || ! grep -Fq '[Rule]' "$work_dir/johnshall.conf"; then
-            failures+=("Johnshall：HTTP ${johnshall_code:-000} 或缺少 [Rule]")
-          fi
-          if [ "$vpsdance_code" != '200' ] || ! grep -Fq 'DOMAIN-SUFFIX,openai.com' "$work_dir/vpsdance.list"; then
-            failures+=("VPSDance OpenAI：HTTP ${vpsdance_code:-000} 或缺少 DOMAIN-SUFFIX,openai.com")
-          fi
-          if [ "$v2fly_code" != '200' ] || ! grep -Eq '(^|[.:])openai\.com([[:space:]]|$)' "$work_dir/v2fly-openai"; then
-            failures+=("v2fly OpenAI：HTTP ${v2fly_code:-000} 或缺少 openai.com")
-          fi
-          echo "Johnshall: $johnshall_code, VPSDance: $vpsdance_code, v2fly: $v2fly_code"
-
-          if [ "${#failures[@]}" -gt 0 ]; then
+          if [ "$status" -ne 0 ]; then
             {
-              echo 'message<<EOF'
-              printf '%s\n' "${failures[@]}"
-              echo 'EOF'
+              echo 'message<<MONITOR_VALIDATION_EOF'
+              printf '%s\n' "$message"
+              echo 'MONITOR_VALIDATION_EOF'
             } >> "$GITHUB_OUTPUT"
-            exit 1
+            exit "$status"
           fi
 
       - name: 创建或更新 GitHub Issue 提醒
