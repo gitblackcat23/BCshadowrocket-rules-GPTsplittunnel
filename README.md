@@ -11,8 +11,8 @@
 - [blackmatrix7/ios_rule_script OpenAI](https://github.com/blackmatrix7/ios_rule_script/tree/master/rule/Shadowrocket/OpenAI) 
 - [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat/blob/sing/geo/geosite/openai.json) 
 - [Public Suffix List](https://publicsuffix.org/) 
-- [Net.Coffee Claude Code 域名分流规则](https://ip.net.coffee/claude/site.html) - 提供 SCCR2685 的原始候选内容
-- [Anthropic Claude Code 网络要求](https://code.claude.com/docs/en/corporate-proxy)
+- [Net.Coffee Claude Code ](https://ip.net.coffee/claude/site.html) 
+- [Anthropic Claude Code](https://code.claude.com/docs/en/corporate-proxy)
 - [blackmatrix7/ios_rule_script](https://github.com/blackmatrix7/ios_rule_script)
 - [fmz200/wool_scripts](https://github.com/fmz200/wool_scripts)
 - [TG-Twilight/AWAvenue-Ads-Rule](https://github.com/TG-Twilight/AWAvenue-Ads-Rule)
