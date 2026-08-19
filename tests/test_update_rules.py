@@ -883,6 +883,27 @@ class RuleGeneratorTests(unittest.TestCase):
                 first_embedded_domain_policy(generated, "humb.apple.com"), "DIRECT"
             )
             self.assertEqual(
+                first_embedded_domain_policy(
+                    generated,
+                    "ckdatabasews.fe2.apple-dns.net",
+                ),
+                "DIRECT",
+            )
+            self.assertEqual(
+                first_embedded_domain_policy(
+                    generated,
+                    "apple-dns.net.example",
+                ),
+                rules.default_node,
+            )
+            for conflicting_rule in (
+                "DOMAIN-SUFFIX,cvws.apple-dns.net,Proxy",
+                "DOMAIN-SUFFIX,news.apple-dns.net,Proxy",
+                "DOMAIN-SUFFIX,gateway.fe.apple-dns.net,Proxy",
+            ):
+                with self.subTest(conflicting_rule=conflicting_rule):
+                    self.assertNotIn(conflicting_rule, generated)
+            self.assertEqual(
                 first_embedded_domain_policy(generated, "quote.10jqka.com.cn"),
                 "DIRECT",
             )
@@ -1103,6 +1124,13 @@ class RuleGeneratorTests(unittest.TestCase):
                 rules.default_node,
             )
             self.assertEqual(first_embedded_domain_policy(generated, "apple.com"), "DIRECT")
+            self.assertEqual(
+                first_embedded_domain_policy(
+                    generated,
+                    "ckdatabasews.fe2.apple-dns.net",
+                ),
+                "DIRECT",
+            )
             self.assertEqual(
                 first_embedded_domain_policy(generated, "quote.10jqka.com.cn"),
                 "DIRECT",

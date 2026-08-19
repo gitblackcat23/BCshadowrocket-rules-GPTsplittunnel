@@ -180,6 +180,8 @@ class RuleValidationError(ValueError):
 # 硬编码高优先级直连域名
 apple_domains = [
     "apple.com", "apple.cn", "apple-cloudkit.com", "apple-livephotoskit.com",
+    # Apple added this suffix to its iCloud network requirements in July 2026.
+    "apple-dns.net",
     "icloud.com", "icloud.com.cn", "icloud-content.com", "me.com",
     "files.apple.com", "ws.icloud.com", "com.apple.ubiquity.bulletin", "com.apple.photos",
     "identity.apple.com", "gs.apple.com", "albert.apple.com", "gdmf.apple.com",
@@ -1990,6 +1992,9 @@ def build_config(
 
     # Remove upstream entries that conflict with the explicit iCloud DIRECT policy above.
     upstream_apple_conflicts = {
+        "DOMAIN-SUFFIX,cvws.apple-dns.net,Proxy",
+        "DOMAIN-SUFFIX,news.apple-dns.net,Proxy",
+        "DOMAIN-SUFFIX,gateway.fe.apple-dns.net,Proxy",
         "DOMAIN-SUFFIX,icloud-cdn.icloud.com.akadns.net,Proxy",
         "DOMAIN-SUFFIX,www-cdn.icloud.com.akadns.net,Proxy",
         "DOMAIN-SUFFIX,metrics.icloud.com,Reject",
