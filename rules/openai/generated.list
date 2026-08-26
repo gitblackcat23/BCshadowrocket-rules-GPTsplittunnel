@@ -1,6 +1,6 @@
 # BC OpenAI merged provider
 # Sources: conservative baseline + official domain overlay + blackmatrix7 + MetaCubeX
-# Generated: 2026-08-25
+# Generated: 2026-08-26
 # Rule count: 72
 
 DOMAIN,android.chat.openai.com
