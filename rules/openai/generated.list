@@ -1,7 +1,7 @@
 # BC OpenAI merged provider
 # Sources: conservative baseline + official domain overlay + blackmatrix7 + MetaCubeX
-# Generated: 2026-10-17
-# Rule count: 72
+# Generated: 2026-10-18
+# Rule count: 73
 
 DOMAIN,android.chat.openai.com
 DOMAIN,auth0.openai.com
@@ -59,6 +59,7 @@ DOMAIN-SUFFIX,oaiusercontent.com
 DOMAIN-SUFFIX,observeit.net
 DOMAIN-SUFFIX,openai.com
 DOMAIN-SUFFIX,openai.com.cdn.cloudflare.net
+DOMAIN-SUFFIX,openai.org
 DOMAIN-SUFFIX,openaiapi-site.azureedge.net
 DOMAIN-SUFFIX,openaicom.imgix.net
 DOMAIN-SUFFIX,segment.io
