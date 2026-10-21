@@ -1,7 +1,7 @@
 # BC OpenAI merged provider
 # Sources: conservative baseline + official domain overlay + blackmatrix7 + MetaCubeX
-# Generated: 2026-10-20
-# Rule count: 73
+# Generated: 2026-10-21
+# Rule count: 74
 
 DOMAIN,android.chat.openai.com
 DOMAIN,auth0.openai.com
@@ -19,6 +19,7 @@ DOMAIN,js.intercomcdn.com
 DOMAIN,js.stripe.com
 DOMAIN,o207216.ingest.sentry.io
 DOMAIN,o33249.ingest.sentry.io
+DOMAIN,o33249.ingest.us.sentry.io
 DOMAIN,openai-api.arkoselabs.com
 DOMAIN,openai.qualtrics.com
 DOMAIN,openaiapi-site.azureedge.net
